@@ -1,0 +1,5 @@
+.venv
+.env
+currency.db
+uis.json
+__pycache__/
