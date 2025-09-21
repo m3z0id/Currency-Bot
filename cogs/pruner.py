@@ -49,7 +49,6 @@ class PrunerCog(commands.Cog):
         prunable_roles.discard(None)  # Remove None if a role ID wasn't found
         if not prunable_roles:
             log.warning("Pruning skipped: None of the configured roles found in guild '%s'.", guild.name)
-            return
 
         # Get inactive user IDs from the database
         inactive_user_ids = await self.user_db.get_inactive_users(self.inactivity_days)
@@ -77,7 +76,9 @@ class PrunerCog(commands.Cog):
 
             # Also add any roles that start with matching prefix
             gradient_roles = [
-                role for role in member.roles if role.name.startswith("Colour: ") or role.name.startswith("Gradient: ")
+                role
+                for role in member.roles
+                if role.name.startswith("Colour: ") or role.name.startswith("Ping: ") or role.name.startswith("Gradient: ")
             ]
             roles_to_remove.extend(gradient_roles)
 
