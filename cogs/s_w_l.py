@@ -14,7 +14,14 @@ cooldown = 300
 
 
 class Sell(commands.Cog):
-    LIMBS: ClassVar[tuple[str, ...]] = ("Left Arm", "Right Arm", "Left Hand", "Right Hand", "Head", "Torso")
+    LIMBS: ClassVar[tuple[str, ...]] = (
+        "Left Arm",
+        "Right Arm",
+        "Left Hand",
+        "Right Hand",
+        "Head",
+        "Torso",
+    )
     ORGANS: ClassVar[tuple[str, ...]] = (
         "Brain",
         "Heart",
@@ -29,7 +36,13 @@ class Sell(commands.Cog):
     def __init__(self, bot: CurrencyBot) -> None:
         self.bot = bot
 
-    async def _process_sale(self, ctx: commands.Context, item: str | None, item_list: tuple[str, ...], action_name: str) -> None:
+    async def _process_sale(
+        self,
+        ctx: commands.Context,
+        item: str | None,
+        item_list: tuple[str, ...],
+        action_name: str,
+    ) -> None:
         """Handle the sale/harvest logic."""
         if item is None:
             item = random.choice(item_list)
@@ -38,7 +51,6 @@ class Sell(commands.Cog):
         if item not in item_list:
             item_type = "limb" if item_list == self.LIMBS else "organ"
             await ctx.send(f"Invalid {item_type}", ephemeral=True)
-            ctx.command.reset_cooldown(ctx)
             return
 
         random_num = random.randint(1, 100)
@@ -54,7 +66,11 @@ class Sell(commands.Cog):
             f"{ctx.author.mention}, you sold wndx2's {item.lower()} for ${random_num}.",
         )
 
-        log.info("%s command executed by %s.", action_name.capitalize(), ctx.author.display_name)
+        log.info(
+            "%s command executed by %s.",
+            action_name.capitalize(),
+            ctx.author.display_name,
+        )
 
     @commands.hybrid_command(name="sell", description="Sell one of wndx2's limbs")
     @commands.cooldown(1, cooldown, commands.BucketType.user)
