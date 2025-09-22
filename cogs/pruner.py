@@ -83,7 +83,7 @@ class PrunerCog(commands.Cog):
             roles_to_remove.extend(gradient_roles)
 
             # Remove duplicates in case a gradient role was already in prunable_roles
-            roles_to_remove = list(set(roles_to_remove))
+            roles_to_remove = [r for r in set(roles_to_remove) if not r.managed]
 
             if roles_to_remove:
                 try:

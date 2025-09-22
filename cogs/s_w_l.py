@@ -79,7 +79,6 @@ class Sell(commands.Cog):
         limb=[app_commands.Choice(name=limb, value=limb.lower()) for limb in LIMBS],
     )
     async def sell(self, ctx: commands.Context, limb: str | None = None) -> None:
-        await ctx.defer()
         await self._process_sale(ctx, limb, self.LIMBS, "sell")
 
     @commands.hybrid_command(name="harvest", description="Harvest one of wndx2's organs")
@@ -89,7 +88,6 @@ class Sell(commands.Cog):
         organ=[app_commands.Choice(name=organ, value=organ.lower()) for organ in ORGANS],
     )
     async def harvest(self, ctx: commands.Context, organ: str | None = None) -> None:
-        await ctx.defer()
         await self._process_sale(ctx, organ, self.ORGANS, "harvest")
 
     @sell.error

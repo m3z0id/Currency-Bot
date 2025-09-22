@@ -16,7 +16,6 @@ class Bal(commands.Cog):
     @commands.hybrid_command(name="bal", description="Displays a user's balance")
     @app_commands.describe(member="User whose balance to show")
     async def bal(self, ctx: commands.Context, member: discord.Member = None) -> None:
-        await ctx.defer()
         if member is None:
             member = ctx.author
 

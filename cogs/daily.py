@@ -63,8 +63,6 @@ class Daily(commands.Cog):
     @commands.hybrid_command(name="daily", description="Claim your daily monies")
     @commands.cooldown(1, cooldown, commands.BucketType.user)
     async def daily(self, ctx: commands.Context) -> None:
-        await ctx.defer()
-
         # scalable daily reward logic
         rewards = [(50, 100), (101, 10000)]  # (min, max) ranges
         weights = [99, 1]  # 99% chance for standard, 1% for jackpot

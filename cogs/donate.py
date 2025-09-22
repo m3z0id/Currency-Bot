@@ -32,8 +32,6 @@ class Donate(commands.Cog):
             await ctx.send(f"Insufficient funds! You have ${balance}")
             return
 
-        await ctx.defer()
-
         success = await self.bot.currency_db.transfer_money(
             sender_id=ctx.author.id,
             receiver_id=receiver.id,

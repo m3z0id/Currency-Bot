@@ -6,9 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 
 dependencies = [
-    "python-dotenv==1.1.1",
-    "discord-py==2.5.2",
-    "aiosqlite==0.21.0",
+  "python-dotenv==1.1.1",
+  "discord-py==2.6.3",
+  "aiosqlite==0.21.0",
 ]
 
 [tool.ruff]
@@ -23,20 +23,20 @@ extend-select = ["ALL"]
 extend-safe-fixes = ["ALL"]
 extend-ignore = [
   "C901",
-  "T201",     # Ignore print
+  "T201",   # Ignore print
   "DTZ005",
-  "N806",     # allow dunder
-  "S311",     # allow non-crypto random
-  "INP001",   # implicit namespace
-  "D100",     # Missing Docstring
-  "D101",     # Missing Docstring
-  "D102",     # Missing Docstring
-  "D103",     # Missing Docstring
-  "D107",     # Missing Docstring
-  "FBT001",   # boolean-default-value-positional-argument
-  "FBT002",   # boolean-default-value-positional-argument
-  "FBT003",   # boolean-default-value-positional-argument
-  "ERA001",   # Commented out code
+  "N806",   # allow dunder
+  "S311",   # allow non-crypto random
+  "INP001", # implicit namespace
+  "D100",   # Missing Docstring
+  "D101",   # Missing Docstring
+  "D102",   # Missing Docstring
+  "D103",   # Missing Docstring
+  "D107",   # Missing Docstring
+  "FBT001", # boolean-default-value-positional-argument
+  "FBT002", # boolean-default-value-positional-argument
+  "FBT003", # boolean-default-value-positional-argument
+  "ERA001", # Commented out code
 ]
 preview = true
 
