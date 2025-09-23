@@ -1,4 +1,3 @@
-import datetime
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -22,7 +21,7 @@ class JoinLeaveLogCog(commands.Cog):
 
     async def cog_load(self) -> None:
         """Fetch the channel object when the cog is loaded."""
-        channel = self.bot.get_channel(self.channel_id)
+        channel = await self.bot.fetch_channel(self.channel_id)
         if isinstance(channel, discord.TextChannel):
             self.log_channel = channel
             log.info("Join/Leave logging channel set to #%s", self.log_channel.name)
@@ -35,7 +34,7 @@ class JoinLeaveLogCog(commands.Cog):
         self,
         member: discord.Member,
         title: str,
-        color: discord.Color,
+        color: discord.Colour,
         description_parts: list[str],
     ) -> None:
         """Construct and sends a standardized embed for join/leave events."""
@@ -45,16 +44,16 @@ class JoinLeaveLogCog(commands.Cog):
 
         embed = discord.Embed(
             color=color,
-            timestamp=datetime.datetime.now(datetime.UTC),
+            timestamp=discord.utils.utcnow(),
             description="\n".join(description_parts),
         )
 
         # Use member's display name and avatar for the author field
         embed.set_author(
             name=f"{member.name} ({member.display_name})",
-            icon_url=member.display_avatar.url,
+            icon_url=member.display_avatar,
         )
-        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_thumbnail(url=member.display_avatar)
         embed.title = title
 
         try:
@@ -69,10 +68,10 @@ class JoinLeaveLogCog(commands.Cog):
         # Use the did_rejoin flag to determine the event type
         if member.flags.did_rejoin:
             title = "Member Rejoined"
-            color = discord.Color.blue()
+            color = discord.Colour.blue()
         else:
             title = "Member Joined"
-            color = discord.Color.green()
+            color = discord.Colour.green()
 
         if member.bot:
             title += " [BOT]"
@@ -81,7 +80,7 @@ class JoinLeaveLogCog(commands.Cog):
         date = int(member.created_at.timestamp())
         description = [
             f"{member.mention} was the **{member.guild.member_count}th** member to join.",
-            f"Account created: <t:{date}:F> <t:{date}:R>",
+            f"Account created: <t:{date}:F> (<t:{date}:R>)",
         ]
 
         await self._log_event(member, title, color, description)
@@ -90,7 +89,7 @@ class JoinLeaveLogCog(commands.Cog):
     async def on_member_remove(self, member: discord.Member) -> None:
         """Handle logging when a member leaves the server."""
         title = "Member Left"
-        color = discord.Color.orange()
+        color = discord.Colour.orange()
 
         if member.bot:
             title += " [BOT]"
@@ -99,11 +98,17 @@ class JoinLeaveLogCog(commands.Cog):
         roles = [r.mention for r in member.roles if r.id != member.guild.default_role.id]
         roles_str = " ".join(roles) if roles else "None"
 
+        # Get the join timestamp to show how long they were a member
+        joined_timestamp = int(member.joined_at.timestamp()) if member.joined_at else None
+
         # Prepare description lines
-        description = [
-            f"{member.mention} has left the server.",
-            f"**Roles:** {roles_str}",
-        ]
+        description = [f"{member.mention} has left the server."]
+        if joined_timestamp:
+            description.append(
+                f"**Joined:** <t:{joined_timestamp}:F> (<t:{joined_timestamp}:R>)",
+            )
+
+        description.append(f"**Roles:** {roles_str}")
 
         await self._log_event(member, title, color, description)
 

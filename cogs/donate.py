@@ -1,7 +1,6 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-from discord.ext.commands import Range
 
 from modules.CurrencyBot import CurrencyBot
 
@@ -21,7 +20,7 @@ class Donate(commands.Cog):
         self,
         ctx: commands.Context,
         receiver: discord.Member,
-        amount: Range[int, 1],
+        amount: commands.Range[int, 1],
     ) -> None:
         # Optional: Add checks to prevent donating to self or bots
         if receiver.id == ctx.author.id:

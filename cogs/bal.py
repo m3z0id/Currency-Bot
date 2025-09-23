@@ -1,5 +1,3 @@
-import datetime
-
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -24,11 +22,11 @@ class Bal(commands.Cog):
         embed = discord.Embed(
             title="Balance",
             description=f"{member.mention}\n Wallet: {balance}",
-            color=discord.Color.green(),
+            color=discord.Colour.green(),
         )
-        embed.set_author(name=member.name, icon_url=member.display_avatar.url)
+        embed.set_author(name=member.name, icon_url=member.display_avatar)
         embed.set_footer(text=f"{ctx.author.display_name} | Balance")
-        embed.timestamp = datetime.datetime.now()
+        embed.timestamp = discord.utils.utcnow()
         await ctx.send(embed=embed)
         print(f"User {member.display_name} has a balance of ${balance}")
 

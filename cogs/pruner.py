@@ -48,7 +48,10 @@ class PrunerCog(commands.Cog):
         prunable_roles = {guild.get_role(role_id) for role_id in self.role_ids_to_prune}
         prunable_roles.discard(None)  # Remove None if a role ID wasn't found
         if not prunable_roles:
-            log.warning("Pruning skipped: None of the configured roles found in guild '%s'.", guild.name)
+            log.warning(
+                "Pruning skipped: None of the configured roles found in guild '%s'.",
+                guild.name,
+            )
 
         # Get inactive user IDs from the database
         inactive_user_ids = await self.user_db.get_inactive_users(self.inactivity_days)
@@ -87,27 +90,31 @@ class PrunerCog(commands.Cog):
 
             if roles_to_remove:
                 try:
-                    await member.remove_roles(*roles_to_remove, reason=f"Pruned for {self.inactivity_days}+ days of inactivity.")
+                    await member.remove_roles(
+                        *roles_to_remove,
+                        reason=f"Pruned for {self.inactivity_days}+ days of inactivity.",
+                    )
                     role_names = ", ".join(f"'{r.name}'" for r in roles_to_remove)
                     log.info("Pruned %s from %s.", role_names, member.display_name)
                     total_members_pruned += 1
                 except Forbidden:
-                    log.exception("Failed to prune %s: Missing Permissions.", member.display_name)
+                    log.exception(
+                        "Failed to prune %s: Missing Permissions.",
+                        member.display_name,
+                    )
                 except HTTPException:
                     log.exception("Failed to prune %s", member.display_name)
 
-        log.info("Pruning complete. Roles removed from %s member(s).", total_members_pruned)
-
-    @prune_loop.before_loop
-    async def before_prune_loop(self) -> None:
-        """Wait until the bot is ready before starting the loop."""
-        await self.bot.wait_until_ready()
+        log.info(
+            "Pruning complete. Roles removed from %s member(s).",
+            total_members_pruned,
+        )
 
 
 # The setup function that discord.py calls when loading the extension
 async def setup(bot: commands.Bot) -> None:
     GUILD_ID = int(os.getenv("GUILD_ID"))
-    ROLES_TO_PRUNE = [int(role_id) for role_id in os.getenv("ROLES_TO_PRUNE").split(",")]
+    ROLES_TO_PRUNE = [int(role_id.strip()) for role_id in os.getenv("ROLES_TO_PRUNE", "").split(",") if role_id.strip()]
     INACTIVITY_DAYS = int(os.getenv("INACTIVITY_DAYS", "14"))
 
     # The cog needs the UserDB instance from the bot

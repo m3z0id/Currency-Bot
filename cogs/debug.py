@@ -10,7 +10,10 @@ class Roles(commands.Cog):
     def __init__(self, bot: CurrencyBot) -> None:
         self.bot = bot
 
-    @commands.hybrid_command(name="listroles", description="Lists all roles, sorted by permissions.")
+    @commands.hybrid_command(
+        name="listroles",
+        description="Lists all roles, sorted by permissions.",
+    )
     @commands.guild_only()  # This command can only be used in a server
     async def list_roles(self, ctx: commands.Context) -> None:
         """List all roles with permissions and those with none."""
@@ -18,14 +21,11 @@ class Roles(commands.Cog):
             await ctx.send("This command can only be used in a server.")
             return
 
-        # We start at index 1 to skip the default @everyone role in the loop,
-        # but we'll handle it separately for clarity in the output.
-        all_roles = ctx.guild.roles[1:]
-
         roles_with_permissions = []
         roles_without_permissions = []
 
-        for role in sorted(all_roles, key=lambda r: r.position, reverse=True):
+        for role in sorted(ctx.guild.roles, key=lambda r: r.position, reverse=True):
+            # Bot integrations and @everyone
             if role.managed:
                 continue
             if role.permissions == discord.Permissions.none():
@@ -36,7 +36,10 @@ class Roles(commands.Cog):
             print(role.name, role.secondary_colour, role.tertiary_colour)
 
         # Create the response embed
-        embed = discord.Embed(title=f"Roles in {ctx.guild.name}", color=discord.Color.blue())
+        embed = discord.Embed(
+            title=f"Roles in {ctx.guild.name}",
+            color=discord.Colour.blue(),
+        )
 
         if roles_with_permissions:
             embed.add_field(

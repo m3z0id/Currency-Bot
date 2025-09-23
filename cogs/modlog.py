@@ -16,14 +16,15 @@ log = logging.getLogger(__name__)
 class ModLogCog(commands.Cog):
     """A cog for logging moderation actions to a specified channel."""
 
-    def __init__(self, bot: "CurrencyBot", mod_channel_id: int) -> None:
+    def __init__(self, bot: "CurrencyBot", mod_channel_id: int, muted_role_id: int | None) -> None:
         self.bot = bot
         self.mod_channel_id = mod_channel_id
+        self.muted_role_id = muted_role_id
         self.mod_channel: discord.TextChannel | None = None
 
     async def cog_load(self) -> None:
         """Fetch the channel object when the cog is loaded."""
-        channel = self.bot.get_channel(self.mod_channel_id)
+        channel = await self.bot.fetch_channel(self.mod_channel_id)
         if isinstance(channel, discord.TextChannel):
             self.mod_channel = channel
             log.info("Moderation logging channel set to #%s", self.mod_channel.name)
@@ -32,11 +33,11 @@ class ModLogCog(commands.Cog):
                 "Could not find the MOD_CHANNEL_ID channel or it is not a text channel.",
             )
 
-    async def _log_action(  # noqa: PLR0913
+    async def _log_action(
         self,
         *,
         title: str,
-        color: discord.Color,
+        color: discord.Colour,
         member: discord.User | discord.Member,
         moderator: discord.User | None,
         reason: str | None,
@@ -50,11 +51,11 @@ class ModLogCog(commands.Cog):
         embed = discord.Embed(
             title=title,
             color=color,
-            timestamp=datetime.datetime.now(datetime.UTC),
+            timestamp=discord.utils.utcnow(),
         )
 
         name = f"{member.name} ({member.display_name})"
-        embed.set_author(name=name, icon_url=member.display_avatar.url)
+        embed.set_author(name=name, icon_url=member.display_avatar)
 
         description = f"**Target:** {member.mention} (`{member.id}`)"
         description += f"\n**Moderator:** {moderator.mention if moderator else 'Unknown'}"
@@ -83,25 +84,19 @@ class ModLogCog(commands.Cog):
     ) -> tuple[discord.User | None, str | None]:
         """Wait and fetch the moderator and reason from the audit log."""
         await asyncio.sleep(3)  # Wait for the audit log to populate
-        moderator, reason = None, None
         THRESHOLD = 10
+        after = discord.utils.utcnow() - datetime.timedelta(seconds=THRESHOLD)
         try:
-            async for entry in guild.audit_logs(limit=5, action=action):
+            async for entry in guild.audit_logs(action=action, after=after):
                 # Check if the entry is recent
-                if (
-                    entry.target
-                    and entry.target.id == target.id
-                    and (datetime.datetime.now(datetime.UTC) - entry.created_at).total_seconds() < THRESHOLD
-                ):
-                    moderator = entry.user
-                    reason = entry.reason
-                    break
+                if entry.target and entry.target.id == target.id:
+                    return entry.user, entry.reason
         except discord.Forbidden:
             log.warning("Missing 'View Audit Log' permissions to identify moderator.")
         except discord.HTTPException:
             log.exception("Failed to fetch audit logs")
 
-        return moderator, reason
+        return None, None
 
     @commands.Cog.listener()
     async def on_member_ban(
@@ -116,7 +111,7 @@ class ModLogCog(commands.Cog):
         )
         await self._log_action(
             title="Member Banned",
-            color=discord.Color.red(),
+            color=discord.Colour.red(),
             member=user,
             moderator=moderator,
             reason=reason,
@@ -131,7 +126,7 @@ class ModLogCog(commands.Cog):
         )
         await self._log_action(
             title="Member Unbanned",
-            color=discord.Color.green(),
+            color=discord.Colour.green(),
             member=user,
             moderator=moderator,
             reason=reason,
@@ -149,7 +144,7 @@ class ModLogCog(commands.Cog):
         if moderator:
             await self._log_action(
                 title="Member Kicked",
-                color=discord.Color.orange(),
+                color=discord.Colour.orange(),
                 member=member,
                 moderator=moderator,
                 reason=reason,
@@ -161,60 +156,99 @@ class ModLogCog(commands.Cog):
         before: discord.Member,
         after: discord.Member,
     ) -> None:
-        if before.timed_out_until == after.timed_out_until:
-            return  # No change in timeout status
+        # --- Timeout (previously Muted) Tracking ---
+        if before.timed_out_until != after.timed_out_until:
+            # Member Timed Out
+            if not before.timed_out_until and after.timed_out_until:
+                moderator, reason = await self._fetch_audit_entry(
+                    after.guild,
+                    after,
+                    discord.AuditLogAction.member_update,
+                )
+                timestamp = int(after.timed_out_until.timestamp())
+                duration_str = f"<t:{timestamp}:F> (<t:{timestamp}:R>)"
 
-        # Member Muted (Timeout Applied)
-        if not before.timed_out_until and after.timed_out_until:
-            moderator, reason = await self._fetch_audit_entry(
-                after.guild,
-                after,
-                discord.AuditLogAction.member_update,
-            )
-            # Get the Unix timestamp for the end date
-            timestamp = int(after.timed_out_until.timestamp())
-            # Format using Discord's relative time syntax
-            duration_str = f"<t:{timestamp}:F> (<t:{timestamp}:R>)"
+                await self._log_action(
+                    title="Member Timed Out",
+                    color=discord.Colour.gold(),
+                    member=after,
+                    moderator=moderator,
+                    reason=reason,
+                    duration=duration_str,
+                )
+            # Timeout Removed
+            elif before.timed_out_until and not after.timed_out_until:
+                moderator, reason = await self._fetch_audit_entry(
+                    after.guild,
+                    after,
+                    discord.AuditLogAction.member_update,
+                )
+                await self._log_action(
+                    title="Timeout Removed",
+                    color=discord.Colour.blue(),
+                    member=after,
+                    moderator=moderator,
+                    reason=reason,
+                    include_reason=False,
+                )
 
-            await self._log_action(
-                title="Member Muted (Timeout)",
-                color=discord.Color.gold(),
-                member=after,
-                moderator=moderator,
-                reason=reason,
-                duration=duration_str,
-            )
+        # --- Muted Role Tracking ---
+        if self.muted_role_id and before.roles != after.roles:
+            muted_role = after.guild.get_role(self.muted_role_id)
+            if not muted_role:
+                return
 
-        # Member Unmuted (Timeout Removed)
-        elif before.timed_out_until and not after.timed_out_until:
-            moderator, reason = await self._fetch_audit_entry(
-                after.guild,
-                after,
-                discord.AuditLogAction.member_update,
-            )
-            await self._log_action(
-                title="Member Unmuted (Timeout Removed)",
-                color=discord.Color.blue(),
-                member=after,
-                moderator=moderator,
-                reason=reason,
-                include_reason=False,  # Reason field is not shown
-            )
+            # Role added
+            if muted_role not in before.roles and muted_role in after.roles:
+                moderator, reason = await self._fetch_audit_entry(
+                    after.guild,
+                    after,
+                    discord.AuditLogAction.member_role_update,
+                )
+                await self._log_action(
+                    title="Member Muted",
+                    color=discord.Colour.dark_orange(),
+                    member=after,
+                    moderator=moderator,
+                    reason=reason,
+                )
+            # Role removed
+            elif muted_role in before.roles and muted_role not in after.roles:
+                moderator, reason = await self._fetch_audit_entry(
+                    after.guild,
+                    after,
+                    discord.AuditLogAction.member_role_update,
+                )
+                await self._log_action(
+                    title="Member Unmuted",
+                    color=discord.Colour.teal(),
+                    member=after,
+                    moderator=moderator,
+                    reason=reason,
+                    include_reason=False,
+                )
 
 
 async def setup(bot: "CurrencyBot") -> None:
     """Add the cog to the bot."""
     mod_channel_id_str = os.getenv("MOD_CHANNEL_ID")
     if not mod_channel_id_str:
-        log.warning(
-            "MOD_CHANNEL_ID environment variable not set. ModLog cog will not be loaded.",
-        )
+        log.warning("MOD_CHANNEL_ID environment variable not set. ModLog cog will not be loaded.")
         return
+
+    # Handle the optional Muted Role ID
+    muted_role_id_str = os.getenv("MUTED_ROLE_ID")
+    muted_role_id = None
+    if muted_role_id_str:
+        try:
+            muted_role_id = int(muted_role_id_str)
+        except ValueError:
+            log.warning("MUTED_ROLE_ID is not a valid integer. Mute tracking will be disabled.")
+    else:
+        log.info("MUTED_ROLE_ID not set. Mute role tracking will be disabled.")
 
     try:
         mod_channel_id = int(mod_channel_id_str)
-        await bot.add_cog(ModLogCog(bot, mod_channel_id))
+        await bot.add_cog(ModLogCog(bot, mod_channel_id, muted_role_id))
     except ValueError:
-        log.exception(
-            "MOD_CHANNEL_ID is not a valid integer. ModLog cog will not be loaded.",
-        )
+        log.exception("MOD_CHANNEL_ID is not a valid integer. ModLog cog will not be loaded.")

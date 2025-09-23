@@ -17,8 +17,8 @@ class UserDB:
                 f"""
                 CREATE TABLE IF NOT EXISTS {self.USERS_TABLE} (
                     discord_id TEXT UNIQUE NOT NULL,
-                    last_message_timestamp TEXT NOT NULL,
-                    daily_reminder INTEGER NOT NULL DEFAULT 0,
+                    last_active_timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                    daily_reminder_preference TEXT NOT NULL DEFAULT 'NEVER',
                     daily_cooldown_ends TEXT
                 )
                 """,
@@ -30,37 +30,38 @@ class UserDB:
         async with self.database.get_conn() as conn:
             await conn.execute(
                 f"""
-                INSERT INTO {self.USERS_TABLE} (discord_id, last_message_timestamp)
+                INSERT INTO {self.USERS_TABLE} (discord_id, last_active_timestamp)
                 VALUES (?, datetime('now'))
                 ON CONFLICT(discord_id) DO UPDATE SET
-                last_message_timestamp = datetime('now')
+                last_active_timestamp = datetime('now')
                 """,  # noqa: S608
                 (discord_id,),
             )
             await conn.commit()
 
-    async def set_daily_reminder(self, discord_id: int, wants_reminder: bool) -> None:
-        """Set the daily reminder preference for a user."""
+    async def set_daily_reminder_preference(
+        self,
+        discord_id: int,
+        preference: str,
+    ) -> None:
+        """Set the daily reminder preference ('ONCE', 'ALWAYS', 'NEVER') for a user."""
+        # Ensure the preference is one of the allowed values to prevent injection
+        if preference not in ("ONCE", "ALWAYS", "NEVER"):
+            msg = "Invalid preference value"
+            raise ValueError(msg)
+
         async with self.database.get_conn() as conn:
             await conn.execute(
                 f"""
-                INSERT INTO {self.USERS_TABLE} (discord_id, last_message_timestamp, daily_reminder)
+                INSERT INTO {self.USERS_TABLE} (discord_id, last_active_timestamp, daily_reminder_preference)
                 VALUES (?, datetime('now'), ?)
                 ON CONFLICT(discord_id) DO UPDATE SET
-                daily_reminder = ?
+                daily_reminder_preference = excluded.daily_reminder_preference,
+                last_active_timestamp = excluded.last_active_timestamp
                 """,  # noqa: S608
-                (discord_id, 1 if wants_reminder else 0, 1 if wants_reminder else 0),
+                (discord_id, preference),
             )
             await conn.commit()
-
-    async def get_users_with_reminders(self) -> list[int]:
-        """Get a list of user IDs who have daily reminders enabled."""
-        async with self.database.get_cursor() as cursor:
-            await cursor.execute(
-                f"SELECT discord_id FROM {self.USERS_TABLE} WHERE daily_reminder = 1",  # noqa: S608
-            )
-            users = await cursor.fetchall()
-        return [int(row[0]) for row in users]
 
     async def get_inactive_users(self, days: int) -> list[int]:
         """Get a list of user IDs that have been inactive for more than a specified number of days."""
@@ -68,7 +69,7 @@ class UserDB:
             await cursor.execute(
                 f"""
                 SELECT discord_id FROM {self.USERS_TABLE}
-                WHERE julianday('now') - julianday(last_message_timestamp) > ?
+                WHERE julianday('now') - julianday(last_active_timestamp) > ?
                 """,  # noqa: S608
                 (days,),
             )
@@ -81,17 +82,16 @@ class UserDB:
             return
 
         async with self.database.get_conn() as conn:
-            # Prepare data for bulk insert/update
             data = [(str(discord_id), timestamp) for discord_id, timestamp in activity_cache.items()]
 
             await conn.executemany(
                 f"""
-                INSERT INTO {self.USERS_TABLE} (discord_id, last_message_timestamp)
+                INSERT INTO {self.USERS_TABLE} (discord_id, last_active_timestamp)
                 VALUES (?, ?)
                 ON CONFLICT(discord_id) DO UPDATE SET
-                last_message_timestamp = ?
+                last_active_timestamp = excluded.last_active_timestamp
                 """,  # noqa: S608
-                [(discord_id, timestamp, timestamp) for discord_id, timestamp in data],
+                data,
             )
             await conn.commit()
 
@@ -100,38 +100,58 @@ class UserDB:
         async with self.database.get_conn() as conn:
             await conn.execute(
                 f"""
-                INSERT INTO {self.USERS_TABLE} (discord_id, last_message_timestamp, daily_cooldown_ends)
+                INSERT INTO {self.USERS_TABLE} (discord_id, last_active_timestamp, daily_cooldown_ends)
                 VALUES (?, datetime('now'), ?)
                 ON CONFLICT(discord_id) DO UPDATE SET
-                daily_cooldown_ends = ?
+                daily_cooldown_ends = excluded.daily_cooldown_ends,
+                last_active_timestamp = excluded.last_active_timestamp
                 """,  # noqa: S608
-                (discord_id, cooldown_ends, cooldown_ends),
+                (discord_id, cooldown_ends),
             )
             await conn.commit()
 
-    async def get_users_ready_for_reminder(self) -> list[int]:
-        """Get users who have reminders enabled and whose cooldown has expired."""
+    async def get_users_ready_for_reminder(self) -> list[tuple[int, str]]:
+        """Get users who have reminders enabled and whose cooldown has expired.
+
+        Returns a list of tuples containing (discord_id, preference).
+        """
         async with self.database.get_cursor() as cursor:
             await cursor.execute(
                 f"""
-                SELECT discord_id FROM {self.USERS_TABLE}
-                WHERE daily_reminder = 1
+                SELECT discord_id, daily_reminder_preference FROM {self.USERS_TABLE}
+                WHERE daily_reminder_preference IN ('ONCE', 'ALWAYS')
                 AND daily_cooldown_ends IS NOT NULL
                 AND datetime(daily_cooldown_ends) <= datetime('now')
                 """,  # noqa: S608
             )
             users = await cursor.fetchall()
-        return [int(row[0]) for row in users]
+        return [(int(row[0]), row[1]) for row in users]
 
-    async def clear_daily_reminder(self, discord_id: int) -> None:
-        """Clear the daily reminder flag and cooldown timestamp for a user."""
+    async def reset_one_time_reminder(self, discord_id: int) -> None:
+        """Set a 'ONCE' reminder back to 'NEVER' after it has been sent."""
         async with self.database.get_conn() as conn:
             await conn.execute(
                 f"""
                 UPDATE {self.USERS_TABLE}
-                SET daily_reminder = 0, daily_cooldown_ends = NULL
+                SET daily_reminder_preference = 'NEVER'
                 WHERE discord_id = ?
                 """,  # noqa: S608
                 (discord_id,),
             )
             await conn.commit()
+
+    async def get_daily_cooldown(self, discord_id: int) -> str | None:
+        """Get the daily cooldown end time for a user.
+
+        Returns the cooldown end time as an ISO string, or None if no cooldown is set.
+        """
+        async with self.database.get_cursor() as cursor:
+            await cursor.execute(
+                f"""
+                SELECT daily_cooldown_ends FROM {self.USERS_TABLE}
+                WHERE discord_id = ?
+                """,  # noqa: S608
+                (discord_id,),
+            )
+            result = await cursor.fetchone()
+        return result[0] if result and result[0] else None

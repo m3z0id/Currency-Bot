@@ -31,7 +31,7 @@ class RolePrunerCog(commands.Cog):
         log.info("Starting daily check for old custom roles to prune.")
 
         # Calculate the cutoff date for roles to be considered old
-        cutoff_date = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=PRUNE_AFTER_DAYS)
+        cutoff_date = discord.utils.utcnow() - datetime.timedelta(days=PRUNE_AFTER_DAYS)
 
         # Iterate over all the guilds the bot is in
         for guild in self.bot.guilds:
@@ -69,11 +69,6 @@ class RolePrunerCog(commands.Cog):
                     )
 
         log.info("Finished daily role pruning check.")
-
-    @prune_roles_loop.before_loop
-    async def before_prune_loop(self) -> None:
-        """Wait until the bot is ready before starting the loop."""
-        await self.bot.wait_until_ready()
 
 
 async def setup(bot: commands.Bot) -> None:
