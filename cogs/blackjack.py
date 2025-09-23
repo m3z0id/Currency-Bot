@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 from enum import Enum, auto
 from typing import TYPE_CHECKING, ClassVar
 
@@ -33,6 +34,21 @@ class GameResult(Enum):
     SURRENDER = auto()
 
 
+# Constants for magic values
+BLACKJACK_VALUE = 21
+BUST_RESULT = -2
+DEALER_WIN_RESULT = -1
+
+# --- Result Configuration ---
+RESULT_CONFIG = {
+    GameResult.WIN: {"stat": "wins", "net_mult": 1.0, "payout_mult": 2.0},
+    GameResult.BLACKJACK: {"stat": "blackjacks", "net_mult": 1.5, "payout_mult": 2.5},
+    GameResult.LOSS: {"stat": "losses", "net_mult": -1.0, "payout_mult": 0.0},
+    GameResult.SURRENDER: {"stat": "losses", "net_mult": -0.5, "payout_mult": 0.5},
+    GameResult.PUSH: {"stat": "pushes", "net_mult": 0.0, "payout_mult": 1.0},
+}
+
+
 # --- UI View: The Core of the Game ---
 class BlackjackView(discord.ui.View):
     """Manages the entire game state, logic, and UI components for a single game."""
@@ -58,8 +74,7 @@ class BlackjackView(discord.ui.View):
         self.outcome_message: str | None = None
 
         # Handle instant blackjack on deal
-        BLACKJACK = 21
-        if BLACKJACK in (self.player.total, self.dealer.total):
+        if BLACKJACK_VALUE in (self.player.total, self.dealer.total):
             # We cannot `await` in __init__, so we run _end_game synchronously.
             # The async payout logic within _end_game will be spun off as a task.
             self._end_game()
@@ -104,63 +119,49 @@ class BlackjackView(discord.ui.View):
             if isinstance(item, discord.ui.Button):
                 item.disabled = is_disabled
 
+    async def _check_and_charge(
+        self,
+        interaction: Interaction,
+        amount: int,
+        action_name: str,
+    ) -> bool:
+        """Check if the user can afford an action and deduct the amount."""
+        if (balance := await self.bot.currency_db.get_balance(interaction.user.id)) < amount:
+            await interaction.response.send_message(
+                f"You don't have enough credits to {action_name}. You need ${amount:,} but only have ${balance:,}.",
+                ephemeral=True,
+            )
+            return False
+
+        await self.bot.currency_db.remove_money(interaction.user.id, amount)
+        return True
+
     # --- Game Flow & Logic ---
     async def _resolve_payout_and_stats(
         self,
         result: GameResult,
         bet_amount: int,
     ) -> None:
-        """Updates the bot's central stat tracker (in-memory) and processes
-        the database transaction for the game's financial outcome.
-        """
+        """Update stats and process database transactions for the game's outcome."""
+        # This check ensures we don't process a non-existent result
+        if not (config := RESULT_CONFIG.get(result)):
+            return
+
+        # --- 1. Update In-Memory Stats ---
         guild_id = self.user.guild.id
         user_id = self.user.id
 
-        # --- 1. Update In-Memory Stats ---
-        if guild_id not in self.bot.blackjack_stats:
-            self.bot.blackjack_stats[guild_id] = {}
-        if user_id not in self.bot.blackjack_stats[guild_id]:
-            self.bot.blackjack_stats[guild_id][user_id] = {
-                "wins": 0,
-                "losses": 0,
-                "pushes": 0,
-                "blackjacks": 0,
-                "net_credits": 0,
-            }
+        # These lines are no longer needed thanks to defaultdict:
+        # if guild_id not in self.bot.blackjack_stats: ...
+        # if user_id not in self.bot.blackjack_stats[guild_id]: ...
 
-        stats = self.bot.blackjack_stats[guild_id][user_id]
-        net_change = 0
+        stats = self.bot.blackjack_stats[guild_id][user_id]  # This will now work automatically
 
-        if result is GameResult.WIN:
-            stats["wins"] += 1
-            net_change = bet_amount
-        elif result is GameResult.BLACKJACK:
-            stats["blackjacks"] += 1
-            net_change = int(bet_amount * 1.5)
-        elif result is GameResult.LOSS:
-            stats["losses"] += 1
-            net_change = -bet_amount
-        elif result is GameResult.SURRENDER:
-            stats["losses"] += 1
-            net_change = -(bet_amount // 2)
-        elif result is GameResult.PUSH:
-            stats["pushes"] += 1
-
-        stats["net_credits"] += net_change
+        stats[config["stat"]] += 1
+        stats["net_credits"] += int(bet_amount * config["net_mult"])
 
         # --- 2. Process Database Payout ---
-        payout = 0
-        if result is GameResult.WIN:
-            payout = bet_amount * 2  # Return original bet + winnings
-        elif result is GameResult.BLACKJACK:
-            payout = bet_amount + int(
-                bet_amount * 1.5,
-            )  # Return original bet + 3:2 winnings
-        elif result is GameResult.PUSH:
-            payout = bet_amount  # Return original bet
-        elif result is GameResult.SURRENDER:
-            payout = bet_amount // 2  # Return half of original bet
-
+        payout = int(bet_amount * config["payout_mult"])
         if payout > 0:
             await self.bot.currency_db.add_money(self.user.id, payout)
 
@@ -173,9 +174,9 @@ class BlackjackView(discord.ui.View):
             result = hand.result
             hand_name = "Split Hand" if hand is not self.player else "Main Hand"
 
-            if result == -2:
+            if result == BUST_RESULT:
                 return (f"{hand_name}: Busted! You lose ${bet:,}.", GameResult.LOSS)
-            if result == -1:
+            if result == DEALER_WIN_RESULT:
                 return (
                     f"{hand_name}: Dealer wins. You lose ${bet:,}.",
                     GameResult.LOSS,
@@ -192,7 +193,7 @@ class BlackjackView(discord.ui.View):
             return ("", GameResult.PUSH)
 
         main_text, main_result = get_result(self.player, self.player.bet)
-        asyncio.create_task(
+        asyncio.create_task(  # noqa: RUF006
             self._resolve_payout_and_stats(main_result, self.player.bet),
         )
 
@@ -201,7 +202,7 @@ class BlackjackView(discord.ui.View):
                 self.player.split,
                 self.player.split.bet,
             )
-            asyncio.create_task(
+            asyncio.create_task(  # noqa: RUF006
                 self._resolve_payout_and_stats(split_result, self.player.split.bet),
             )
             self.outcome_message = f"{main_text}\n{split_text}"
@@ -220,13 +221,15 @@ class BlackjackView(discord.ui.View):
     # --- Embed Creation ---
     def create_embed(self) -> discord.Embed:
         is_game_over = self.outcome_message is not None
-        color = discord.Colour.blue()
+        color = discord.Colour.blue()  # Default for ongoing game
         if is_game_over:
-            (self.bot.blackjack_stats.get(self.user.guild.id, {}).get(self.user.id, {}).get("net_credits", 0))
-            is_win = "win" in self.outcome_message.lower() or "get" in self.outcome_message.lower()
-            color = discord.Colour.green() if is_win else discord.Colour.red()
+            # Determine color based on game outcome
             if "push" in self.outcome_message.lower():
                 color = discord.Colour.light_grey()
+            elif "win" in self.outcome_message.lower() or "blackjack" in self.outcome_message.lower():
+                color = discord.Colour.green()
+            else:
+                color = discord.Colour.red()
 
         embed = discord.Embed(
             title=f"Blackjack | Total Bet: ${self.total_bet_at_risk:,}",
@@ -269,7 +272,7 @@ class HitButton(discord.ui.Button["BlackjackView"]):
         super().__init__(
             label="Hit",
             style=discord.ButtonStyle.secondary,
-            emoji="➕",
+            emoji="➕",  # noqa: RUF001
         )
 
     async def callback(self, interaction: Interaction) -> None:
@@ -282,13 +285,13 @@ class HitButton(discord.ui.Button["BlackjackView"]):
             view.last_action += " You busted!"
             if view.player.split and view.active_hand_state is ActiveHand.PRIMARY:
                 view.active_hand_state = ActiveHand.SPLIT
-                view._update_buttons()
+                view._update_buttons()  # noqa: SLF001
                 await interaction.response.edit_message(
                     embed=view.create_embed(),
                     view=view,
                 )
             else:
-                view._end_game()
+                view._end_game()  # noqa: SLF001
                 await interaction.response.edit_message(
                     embed=view.create_embed(),
                     view=view,
@@ -311,13 +314,13 @@ class StandButton(discord.ui.Button["BlackjackView"]):
 
         if view.player.split and view.active_hand_state is ActiveHand.PRIMARY:
             view.active_hand_state = ActiveHand.SPLIT
-            view._update_buttons()
+            view._update_buttons()  # noqa: SLF001
             await interaction.response.edit_message(
                 embed=view.create_embed(),
                 view=view,
             )
         else:
-            await view._handle_stand_or_dd(interaction)
+            await view._handle_stand_or_dd(interaction)  # noqa: SLF001
 
 
 class DoubleDownButton(discord.ui.Button["BlackjackView"]):
@@ -330,18 +333,12 @@ class DoubleDownButton(discord.ui.Button["BlackjackView"]):
 
     async def callback(self, interaction: Interaction) -> None:
         view = self.view
-        # Check if user can afford to double down
-        if (balance := await view.bot.currency_db.get_balance(interaction.user.id)) < view.initial_bet:
-            await interaction.response.send_message(
-                f"You don't have enough credits to double down. You need ${view.initial_bet:,} but only have ${balance:,}.",
-                ephemeral=True,
-            )
+        if not await view._check_and_charge(interaction, view.initial_bet, "double down"):  # noqa: SLF001
             return
 
-        await view.bot.currency_db.remove_money(interaction.user.id, view.initial_bet)
         card = view.player.play_double_down()
         view.last_action = f"You doubled down and drew a {card}. Final total: {view.player.total}."
-        await view._handle_stand_or_dd(interaction)
+        await view._handle_stand_or_dd(interaction)  # noqa: SLF001
 
 
 class SplitButton(discord.ui.Button["BlackjackView"]):
@@ -350,22 +347,13 @@ class SplitButton(discord.ui.Button["BlackjackView"]):
 
     async def callback(self, interaction: Interaction) -> None:
         view = self.view
-        # Check if user can afford to split
-        if (balance := await view.bot.currency_db.get_balance(interaction.user.id)) < view.initial_bet:
-            await interaction.response.send_message(
-                f"You don't have enough credits to split. You need ${view.initial_bet:,} but only have ${balance:,}.",
-                ephemeral=True,
-            )
+        if not await view._check_and_charge(interaction, view.initial_bet, "split"):  # noqa: SLF001
             return
 
         if view.player.can_split:
-            await view.bot.currency_db.remove_money(
-                interaction.user.id,
-                view.initial_bet,
-            )
             view.last_action = "You split your hand!"
             view.player.play_split()
-            view._update_buttons()
+            view._update_buttons()  # noqa: SLF001
             await interaction.response.edit_message(
                 embed=view.create_embed(),
                 view=view,
@@ -380,11 +368,11 @@ class SurrenderButton(discord.ui.Button["BlackjackView"]):
         view = self.view
         surrender_return = view.initial_bet // 2
         view.outcome_message = f"You surrendered. Half your bet (${surrender_return:,}) was returned."
-        view.player._bust = True  # Internal way to mark a loss
+        view.player._bust = True  # Internal way to mark a loss  # noqa: SLF001
         view.disable_all_buttons(True)
 
-        await view._resolve_payout_and_stats(GameResult.SURRENDER, view.initial_bet)
-        view._update_buttons()
+        await view._resolve_payout_and_stats(GameResult.SURRENDER, view.initial_bet)  # noqa: SLF001
+        view._update_buttons()  # noqa: SLF001
         await interaction.response.edit_message(embed=view.create_embed(), view=view)
 
 
@@ -426,7 +414,7 @@ class NewBetButton(discord.ui.Button["BlackjackView"]):
 
 # --- Helper & Cog ---
 def format_hand(hand: list[Card], is_dealer_hidden: bool = False) -> str:
-    """Formats cards with suit emojis for a richer display."""
+    """Format cards with suit emojis for a richer display."""
     suits = {"Hearts": "♥️", "Diamonds": "♦️", "Spades": "♠️", "Clubs": "♣️"}
 
     def format_card(card: Card) -> str:
@@ -440,8 +428,15 @@ def format_hand(hand: list[Card], is_dealer_hidden: bool = False) -> str:
 class BlackjackCog(commands.Cog):
     def __init__(self, bot: CurrencyBot) -> None:
         self.bot = bot
-        # In-memory stat tracking. For persistence, you'd use a database.
-        self.bot.blackjack_stats: dict[int, dict[int, dict[str, int]]] = {}
+
+        # This factory creates a default stat dict for a new user
+        def user_stats_factory() -> dict[str, int]:
+            return {"wins": 0, "losses": 0, "pushes": 0, "blackjacks": 0, "net_credits": 0}
+
+        # Initialize as a nested defaultdict
+        self.bot.blackjack_stats: defaultdict[int, defaultdict[int, dict[str, int]]] = defaultdict(
+            lambda: defaultdict(user_stats_factory),
+        )
 
     @commands.hybrid_command(
         name="blackjack",
