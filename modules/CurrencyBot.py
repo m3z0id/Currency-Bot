@@ -6,7 +6,12 @@ import discord
 from discord import Forbidden, HTTPException, MissingApplicationID
 from discord.app_commands import CommandSyncFailure, TranslationError
 from discord.ext import commands, tasks
-from discord.ext.commands import ExtensionAlreadyLoaded, ExtensionFailed, ExtensionNotFound, NoEntryPointError
+from discord.ext.commands import (
+    ExtensionAlreadyLoaded,
+    ExtensionFailed,
+    ExtensionNotFound,
+    NoEntryPointError,
+)
 
 from modules.CurrencyDB import CurrencyDB
 from modules.Database import Database
@@ -78,6 +83,9 @@ class CurrencyBot(commands.Bot):
                             "⏰ Your daily reward is ready to claim! Use `/daily` to get your reward.",
                         )
                         log.info("Sent daily reminder to user %d", user_id)
+
+                        # Clear the cooldown timestamp to prevent re-sending reminders until the next /daily command.
+                        await self.user_db.clear_daily_cooldown(user_id)
 
                         if preference == "ONCE":
                             await self.user_db.reset_one_time_reminder(user_id)

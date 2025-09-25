@@ -63,6 +63,19 @@ class UserDB:
             )
             await conn.commit()
 
+    async def get_active_users(self, days: int) -> list[int]:
+        """Get a list of user IDs that have been active within a specified number of days."""
+        async with self.database.get_cursor() as cursor:
+            await cursor.execute(
+                f"""
+                SELECT discord_id FROM {self.USERS_TABLE}
+                WHERE julianday('now') - julianday(last_active_timestamp) <= ?
+                """,  # noqa: S608
+                (days,),
+            )
+            active_users = await cursor.fetchall()
+        return [int(row[0]) for row in active_users]
+
     async def get_inactive_users(self, days: int) -> list[int]:
         """Get a list of user IDs that have been inactive for more than a specified number of days."""
         async with self.database.get_cursor() as cursor:
@@ -155,3 +168,16 @@ class UserDB:
             )
             result = await cursor.fetchone()
         return result[0] if result and result[0] else None
+
+    async def clear_daily_cooldown(self, discord_id: int) -> None:
+        """Clear the daily cooldown for a user, typically after a reminder is sent."""
+        async with self.database.get_conn() as conn:
+            await conn.execute(
+                f"""
+                UPDATE {self.USERS_TABLE}
+                SET daily_cooldown_ends = NULL
+                WHERE discord_id = ?
+                """,  # noqa: S608
+                (discord_id,),
+            )
+            await conn.commit()
