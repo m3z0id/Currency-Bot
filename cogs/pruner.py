@@ -30,7 +30,7 @@ class PrunerCog(commands.Cog):
     async def cog_load(self) -> None:
         self.prune_loop.start()
 
-    async def cog_unload(self) -> None:
+    def cog_unload(self) -> None:
         """Clean up when the cog is unloaded."""
         self.prune_loop.cancel()
 
@@ -39,7 +39,7 @@ class PrunerCog(commands.Cog):
         """Check for and prune inactive members."""
         log.info("Running automatic prune check for inactive members...")
 
-        guild = self.bot.get_guild(self.guild_id)
+        guild = await self.bot.fetch_guild(self.guild_id)
         if not guild:
             log.error("Pruning failed: Guild with ID %s not found.", self.guild_id)
             return

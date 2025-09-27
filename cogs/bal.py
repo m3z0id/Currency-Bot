@@ -1,8 +1,12 @@
+import logging
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from modules.CurrencyBot import CurrencyBot
+
+log = logging.getLogger(__name__)
 
 
 class Bal(commands.Cog):
@@ -28,9 +32,9 @@ class Bal(commands.Cog):
         embed.set_footer(text=f"{ctx.author.display_name} | Balance")
         embed.timestamp = discord.utils.utcnow()
         await ctx.send(embed=embed)
-        print(f"User {member.display_name} has a balance of ${balance}")
+        log.info("User %s has a balance of $%s", member.display_name, balance)
 
-        print(f"Bal command executed by {member.display_name}.\n")
+        log.info("Bal command executed by %s.\n", member.display_name)
 
 
 async def setup(bot: CurrencyBot) -> None:

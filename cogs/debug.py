@@ -1,7 +1,11 @@
+import logging
+
 import discord
 from discord.ext import commands
 
 from modules.CurrencyBot import CurrencyBot
+
+log = logging.getLogger(__name__)
 
 
 class Roles(commands.Cog):
@@ -33,7 +37,7 @@ class Roles(commands.Cog):
             else:
                 roles_with_permissions.append(role.mention)
 
-            print(role.name, role.secondary_colour, role.tertiary_colour)
+            log.info(role.name, role.secondary_colour, role.tertiary_colour)
 
         # Create the response embed
         embed = discord.Embed(
@@ -68,7 +72,7 @@ class Roles(commands.Cog):
             )
 
         await ctx.send(embed=embed)
-        print(f"'listroles' command executed by {ctx.author.display_name}.\n")
+        log.info("'listroles' command executed by %s.\n", ctx.author.display_name)
 
 
 async def setup(bot: CurrencyBot) -> None:

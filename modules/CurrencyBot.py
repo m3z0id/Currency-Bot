@@ -1,11 +1,11 @@
 import logging
 import pathlib
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import discord
 from discord import Forbidden, HTTPException, MissingApplicationID
 from discord.app_commands import CommandSyncFailure, TranslationError
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord.ext.commands import (
     ExtensionAlreadyLoaded,
     ExtensionFailed,
@@ -15,6 +15,7 @@ from discord.ext.commands import (
 
 from modules.CurrencyDB import CurrencyDB
 from modules.Database import Database
+from modules.TaskDB import TaskDB
 from modules.UserDB import UserDB
 
 log = logging.getLogger(__name__)
@@ -38,11 +39,13 @@ class CurrencyBot(commands.Bot):
         self.database: Database = Database()
         self.currency_db = CurrencyDB(self.database)
         self.user_db = UserDB(self.database)
+        self.task_db = TaskDB(self.database)
 
         # AWAIT the post-initialization tasks to ensure tables are created
         await self.currency_db.post_init()
         await self.user_db.post_init()
-        log.info("Database tables initialized.")
+        await self.task_db.post_init()
+        log.info("All database tables initialized.")
 
         # Now it's safe to load cogs
         try:
@@ -66,37 +69,28 @@ class CurrencyBot(commands.Bot):
         ):
             log.exception("Error syncing commands")
 
-        # Start the reminder background task
-        self.reminder_task.start()
-        log.info("Reminder background task started.")
+        log.info("Setup complete.")
 
-    @tasks.loop(minutes=5)
-    async def reminder_task(self) -> None:
-        """Background task that handles sending daily reminders."""
+    async def on_error(self, event_method: str, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        """Log unhandled exceptions."""
+        log.exception("Unhandled exception in %s", event_method, extra={"*args": args, "**kwargs": kwargs})
+
+    async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
+        """Log unhandled command exceptions."""
         try:
-            users_to_remind = await self.user_db.get_users_ready_for_reminder()
-            for user_id, preference in users_to_remind:
-                try:
-                    user = await self.fetch_user(user_id)
-                    if user:
-                        await user.send(
-                            "⏰ Your daily reward is ready to claim! Use `/daily` to get your reward.",
-                        )
-                        log.info("Sent daily reminder to user %d", user_id)
-
-                        # Clear the cooldown timestamp to prevent re-sending reminders until the next /daily command.
-                        await self.user_db.clear_daily_cooldown(user_id)
-
-                        if preference == "ONCE":
-                            await self.user_db.reset_one_time_reminder(user_id)
-                            log.info("Reset one-time reminder for user %d", user_id)
-
-                except (
-                    discord.Forbidden,
-                    discord.HTTPException,
-                    discord.NotFound,
-                ):
-                    log.exception("Error sending reminder to user %d", user_id)
-
-        except (discord.HTTPException, ConnectionError, OSError):
-            log.exception("Error in reminder background task")
+            raise error  # noqa: TRY301
+        except commands.CommandNotFound:
+            pass  # Ignore commands that don't exist
+        except commands.CommandOnCooldown as e:
+            await ctx.send(
+                f"This command is on cooldown. Try again in {e.retry_after:.2f}s.",
+                ephemeral=True,
+            )
+        except commands.MissingPermissions as e:
+            await ctx.send(
+                f"You're missing the permissions to run this command: {', '.join(e.missing_permissions)}",
+                ephemeral=True,
+            )
+        except Exception:
+            log.exception("Unhandled command error in '%s'", ctx.command)
+            await ctx.send("An unexpected error occurred.", ephemeral=True)

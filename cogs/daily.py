@@ -4,22 +4,23 @@
 Uses ephemeral messages to reduce channel spam.
 """
 
+import asyncio
+import datetime
 import logging
 import random
-from datetime import timedelta
+import time
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 if TYPE_CHECKING:
     # This avoids circular imports while providing type hints for the bot class
     from modules.CurrencyBot import CurrencyBot
 
 log = logging.getLogger(__name__)
-
-# Set the cooldown to a standard 24 hours (86400 seconds)
-cooldown = 86400
 
 # Constants for magic values
 JACKPOT_THRESHOLD = 1000
@@ -153,48 +154,99 @@ class DailyView(discord.ui.View):
 class Daily(commands.Cog):
     def __init__(self, bot: "CurrencyBot") -> None:
         self.bot = bot
+        self.daily_management_task.start()
+
+    def cog_unload(self) -> None:
+        """Clean up when the cog is unloaded."""
+        self.daily_management_task.cancel()
+
+    @tasks.loop(time=datetime.time(0, 0, tzinfo=ZoneInfo("Pacific/Auckland")))
+    async def daily_management_task(self) -> None:
+        """Handle daily resets and reminders using pure bulk operations."""
+        log.info("Starting daily management task...")
+        try:
+            # Atomically reset all daily claims and fetch users needing a reminder.
+            all_users_to_remind = await self.bot.user_db.process_daily_reset()
+            if not all_users_to_remind:
+                log.info("No users to remind for their daily claim.")
+                return
+
+            log.info("Preparing to send %d daily reminders.", len(all_users_to_remind))
+            await self.send_reminders(all_users_to_remind)
+
+        except Exception:
+            log.exception("An error occurred during the daily management task.")
+        finally:
+            # After running, persist the *next* run time to the database.
+            next_run_time = self.daily_management_task.next_iteration
+            if next_run_time:
+                log.info("Persisting next DAILY_RESET time: %s", next_run_time.isoformat())
+                await self.bot.task_db.schedule_task("DAILY_RESET", next_run_time.timestamp())
+
+    @daily_management_task.before_loop
+    async def before_daily_management_task(self) -> None:
+        """Wait until the bot is ready and handle any missed runs."""
+        await self.bot.wait_until_ready()
+
+        # Check if a reset was missed while the bot was offline.
+        pending_task = await self.bot.task_db.get_pending_task("DAILY_RESET")
+        if pending_task:
+            _task_type, due_timestamp = pending_task
+            if due_timestamp - time.time() <= 0:
+                log.info("DAILY_RESET was missed. Running it now before starting loop.")
+                # Run the task logic directly, not the loop itself
+                await self.daily_management_task.coro(self)
+                # The task will persist its *next* run time inside the `finally` block.
+
+        # Persist the next scheduled run time to the DB before the loop starts sleeping.
+        next_run_time = self.daily_management_task.next_iteration
+        if next_run_time:
+            log.info("Persisting next DAILY_RESET time: %s", next_run_time.isoformat())
+            await self.bot.task_db.schedule_task("DAILY_RESET", next_run_time.timestamp())
+        else:
+            log.info("Daily task loop has no missed run.")
+
+    async def send_reminders(self, user_ids: Iterable[int]) -> None:
+        """Send reminders to a list of users sequentially to avoid rate limits."""
+        reminder_message = "⏰ Your daily reward is ready to claim! Use `/daily` to get your reward."
+        success_count = 0
+        total_count = 0
+
+        for user_id in user_ids:
+            total_count += 1
+            try:
+                user = await self.bot.fetch_user(user_id)
+                await user.send(reminder_message)
+                success_count += 1
+            except (discord.Forbidden, discord.NotFound):
+                log.warning("Could not send reminder to user %d (DMs disabled or user not found).", user_id)
+            except discord.HTTPException:
+                log.exception("Failed to send reminder to user %d due to an HTTP error.", user_id)
+            finally:
+                # Wait for a short duration between messages to respect rate limits.
+                await asyncio.sleep(1)
+
+        log.info("Successfully sent %d out of %d daily reminders.", success_count, total_count)
 
     @commands.hybrid_command(name="daily", description="Claim your daily currency.")
-    @commands.cooldown(1, cooldown, commands.BucketType.user)
     async def daily(self, ctx: commands.Context) -> None:
-        # Check database cooldown before proceeding to prevent bypass on bot restart
-        cooldown_str = await self.bot.user_db.get_daily_cooldown(ctx.author.id)
-        if cooldown_str:
-            try:
-                # Parse the ISO format timestamp from database
-                cooldown_end = discord.utils.parse_time(cooldown_str)
-                if cooldown_end and discord.utils.utcnow() < cooldown_end:
-                    # Cooldown is still active, show error message
-                    (cooldown_end - discord.utils.utcnow()).total_seconds()
-                    timestamp = int(cooldown_end.timestamp())
-                    embed = discord.Embed(
-                        title="Cooldown Active",
-                        description=f"You can claim your next daily <t:{timestamp}:R> (at <t:{timestamp}:f>).",
-                        color=discord.Colour.red(),
-                    )
-                    await ctx.send(embed=embed, ephemeral=True)
-                    return
-            except (ValueError, TypeError):
-                # If parsing fails, continue with normal flow
-                log.warning(
-                    "Failed to parse cooldown timestamp for user %s: %s",
-                    ctx.author.id,
-                    cooldown_str,
-                )
+        # Atomically attempt to claim the daily. If it fails, they've already claimed.
+        if not await self.bot.user_db.attempt_daily_claim(ctx.author.id):
+            embed = discord.Embed(
+                title="Already Claimed",
+                description="You have already claimed your daily reward! Wait for the next reset at midnight Auckland time.",
+                color=discord.Colour.red(),
+            )
+            await ctx.send(embed=embed, ephemeral=True)
+            return
 
-        rewards = [(50, 100), (101, 10000)]
-        weights = [99, 1]
-        chosen_range = random.choices(rewards, weights=weights, k=1)[0]
-        daily_mon = random.randint(*chosen_range)
+        # Simplified reward logic: 1% chance for a jackpot, 99% for a standard reward.
+        daily_mon = (
+            random.randint(101, 10000) if random.random() < 0.01 else random.randint(50, 100)  # noqa: PLR2004
+        )
 
         await self.bot.currency_db.add_money(ctx.author.id, daily_mon)
         new_balance = await self.bot.currency_db.get_balance(ctx.author.id)
-
-        cooldown_ends = discord.utils.utcnow() + timedelta(seconds=cooldown)
-        await self.bot.user_db.set_daily_cooldown(
-            ctx.author.id,
-            cooldown_ends.isoformat(),
-        )
 
         log.info(
             "User %s claimed $%s, new balance is $%s",
@@ -203,7 +255,6 @@ class Daily(commands.Cog):
             new_balance,
         )
 
-        next_claim_timestamp = int(cooldown_ends.timestamp())
         title = "🎉 Daily Claim Successful! 🎉"
         if daily_mon > JACKPOT_THRESHOLD:
             title = "🎊 JACKPOT! 🎊"
@@ -212,7 +263,7 @@ class Daily(commands.Cog):
             f"### {title}\n"
             f"You have received **${daily_mon:,}**!\n"
             f"Your new balance is **${new_balance:,}**.\n\n"
-            f"Your next claim is available <t:{next_claim_timestamp}:R>."
+            f"Your next claim will be available after the daily reset at midnight NZ time."
         )
 
         view = DailyView(
@@ -225,31 +276,6 @@ class Daily(commands.Cog):
         )
 
         await ctx.send(response_content, view=view, ephemeral=True)
-
-    @daily.error
-    async def daily_error(
-        self,
-        ctx: commands.Context,
-        error: commands.CommandError,
-    ) -> None:
-        if isinstance(error, commands.CommandOnCooldown):
-            cooldown_end_time = discord.utils.utcnow() + timedelta(
-                seconds=error.retry_after,
-            )
-            timestamp = int(cooldown_end_time.timestamp())
-
-            embed = discord.Embed(
-                title="Cooldown Active",
-                description=f"You can claim your next daily <t:{timestamp}:R> (at <t:{timestamp}:f>).",
-                color=discord.Colour.red(),
-            )
-            await ctx.send(embed=embed, ephemeral=True)
-        else:
-            log.error("An unexpected error occurred in the daily command: %s", error)
-            await ctx.send(
-                "An unexpected error occurred. Please try again later.",
-                ephemeral=True,
-            )
 
 
 async def setup(bot: "CurrencyBot") -> None:

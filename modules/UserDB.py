@@ -16,10 +16,10 @@ class UserDB:
             await conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {self.USERS_TABLE} (
-                    discord_id TEXT UNIQUE NOT NULL,
-                    last_active_timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                    discord_id INTEGER PRIMARY KEY NOT NULL,
+                    last_active_timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
                     daily_reminder_preference TEXT NOT NULL DEFAULT 'NEVER',
-                    daily_cooldown_ends TEXT
+                    has_claimed_daily INTEGER NOT NULL DEFAULT 0
                 )
                 """,
             )
@@ -30,10 +30,10 @@ class UserDB:
         async with self.database.get_conn() as conn:
             await conn.execute(
                 f"""
-                INSERT INTO {self.USERS_TABLE} (discord_id, last_active_timestamp)
-                VALUES (?, datetime('now'))
+                INSERT INTO {self.USERS_TABLE} (discord_id)
+                VALUES (?)
                 ON CONFLICT(discord_id) DO UPDATE SET
-                last_active_timestamp = datetime('now')
+                last_active_timestamp = strftime('%Y-%m-%d %H:%M:%f', 'now')
                 """,  # noqa: S608
                 (discord_id,),
             )
@@ -53,8 +53,8 @@ class UserDB:
         async with self.database.get_conn() as conn:
             await conn.execute(
                 f"""
-                INSERT INTO {self.USERS_TABLE} (discord_id, last_active_timestamp, daily_reminder_preference)
-                VALUES (?, datetime('now'), ?)
+                INSERT INTO {self.USERS_TABLE} (discord_id, daily_reminder_preference)
+                VALUES (?, ?)
                 ON CONFLICT(discord_id) DO UPDATE SET
                 daily_reminder_preference = excluded.daily_reminder_preference,
                 last_active_timestamp = excluded.last_active_timestamp
@@ -89,95 +89,79 @@ class UserDB:
             inactive_users = await cursor.fetchall()
         return [int(row[0]) for row in inactive_users]
 
-    async def bulk_update_last_message(self, activity_cache: dict[int, str]) -> None:
-        """Bulk update last message timestamps from the activity cache."""
-        if not activity_cache:
+    async def update_active_users(self, user_ids: list[int]) -> None:
+        """Bulk update the last active timestamp for a list of users."""
+        if not user_ids:
             return
 
         async with self.database.get_conn() as conn:
-            data = [(str(discord_id), timestamp) for discord_id, timestamp in activity_cache.items()]
-
             await conn.executemany(
                 f"""
-                INSERT INTO {self.USERS_TABLE} (discord_id, last_active_timestamp)
-                VALUES (?, ?)
+                INSERT INTO {self.USERS_TABLE} (discord_id) VALUES (?)
                 ON CONFLICT(discord_id) DO UPDATE SET
-                last_active_timestamp = excluded.last_active_timestamp
+                    last_active_timestamp = strftime('%Y-%m-%d %H:%M:%f', 'now')
                 """,  # noqa: S608
-                data,
+                [(user_id,) for user_id in user_ids],
             )
             await conn.commit()
 
-    async def set_daily_cooldown(self, discord_id: int, cooldown_ends: str) -> None:
-        """Set the daily cooldown end time for a user."""
+    async def attempt_daily_claim(self, discord_id: int) -> bool:
+        """Atomically attempt to claim a daily reward for a user.
+
+        This method ensures a user is in the database and then tries to update
+        their `has_claimed_daily` status from 0 to 1. This is done in a single
+        transaction to prevent race conditions.
+
+        Returns:
+            bool: True if the claim was successful, False if already claimed.
+
+        """
         async with self.database.get_conn() as conn:
-            await conn.execute(
+            # This single atomic operation ensures the user exists, then attempts
+            # to update the claim status only if `has_claimed_daily` is 0.
+            cursor = await conn.execute(
                 f"""
-                INSERT INTO {self.USERS_TABLE} (discord_id, last_active_timestamp, daily_cooldown_ends)
-                VALUES (?, datetime('now'), ?)
+                INSERT INTO {self.USERS_TABLE} (discord_id, has_claimed_daily) VALUES (?, 1)
                 ON CONFLICT(discord_id) DO UPDATE SET
-                daily_cooldown_ends = excluded.daily_cooldown_ends,
-                last_active_timestamp = excluded.last_active_timestamp
+                    has_claimed_daily = 1
+                WHERE excluded.discord_id = ? AND {self.USERS_TABLE}.has_claimed_daily = 0
                 """,  # noqa: S608
-                (discord_id, cooldown_ends),
+                (discord_id, discord_id),
             )
             await conn.commit()
+            return cursor.rowcount == 1
 
-    async def get_users_ready_for_reminder(self) -> list[tuple[int, str]]:
-        """Get users who have reminders enabled and whose cooldown has expired.
+    async def process_daily_reset(self) -> list[int]:
+        """Atomically reset all daily claims and fetch users who need a reminder.
 
-        Returns a list of tuples containing (discord_id, preference).
+        This single transaction performs three actions:
+        1. Fetches all users who have not claimed their daily and have reminders enabled.
+        2. Resets `has_claimed_daily` to 0 for ALL users.
+        3. Resets `daily_reminder_preference` to 'NEVER' for users who had it set to 'ONCE'.
+
+        Returns:
+            A list of user IDs to be reminded.
+
         """
-        async with self.database.get_cursor() as cursor:
-            await cursor.execute(
+        async with self.database.get_conn() as conn:
+            # 1. Fetch users who need a reminder BEFORE resetting claims.
+            cursor = await conn.execute(
                 f"""
-                SELECT discord_id, daily_reminder_preference FROM {self.USERS_TABLE}
-                WHERE daily_reminder_preference IN ('ONCE', 'ALWAYS')
-                AND daily_cooldown_ends IS NOT NULL
-                AND datetime(daily_cooldown_ends) <= datetime('now')
+                SELECT discord_id FROM {self.USERS_TABLE}
+                WHERE daily_reminder_preference IN ('ALWAYS', 'ONCE')
                 """,  # noqa: S608
             )
-            users = await cursor.fetchall()
-        return [(int(row[0]), row[1]) for row in users]
+            user_ids_to_remind = [int(row[0]) for row in await cursor.fetchall()]
 
-    async def reset_one_time_reminder(self, discord_id: int) -> None:
-        """Set a 'ONCE' reminder back to 'NEVER' after it has been sent."""
-        async with self.database.get_conn() as conn:
+            # 2. Atomically reset daily claims and 'ONCE' preferences for all users.
             await conn.execute(
                 f"""
-                UPDATE {self.USERS_TABLE}
-                SET daily_reminder_preference = 'NEVER'
-                WHERE discord_id = ?
+                UPDATE {self.USERS_TABLE} SET
+                    has_claimed_daily = 0,
+                    daily_reminder_preference = CASE
+                        WHEN daily_reminder_preference = 'ONCE' THEN 'NEVER'
+                        ELSE daily_reminder_preference END
                 """,  # noqa: S608
-                (discord_id,),
             )
             await conn.commit()
-
-    async def get_daily_cooldown(self, discord_id: int) -> str | None:
-        """Get the daily cooldown end time for a user.
-
-        Returns the cooldown end time as an ISO string, or None if no cooldown is set.
-        """
-        async with self.database.get_cursor() as cursor:
-            await cursor.execute(
-                f"""
-                SELECT daily_cooldown_ends FROM {self.USERS_TABLE}
-                WHERE discord_id = ?
-                """,  # noqa: S608
-                (discord_id,),
-            )
-            result = await cursor.fetchone()
-        return result[0] if result and result[0] else None
-
-    async def clear_daily_cooldown(self, discord_id: int) -> None:
-        """Clear the daily cooldown for a user, typically after a reminder is sent."""
-        async with self.database.get_conn() as conn:
-            await conn.execute(
-                f"""
-                UPDATE {self.USERS_TABLE}
-                SET daily_cooldown_ends = NULL
-                WHERE discord_id = ?
-                """,  # noqa: S608
-                (discord_id,),
-            )
-            await conn.commit()
+            return user_ids_to_remind

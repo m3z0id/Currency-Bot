@@ -1,8 +1,12 @@
+import logging
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from modules.CurrencyBot import CurrencyBot
+
+log = logging.getLogger(__name__)
 
 
 class Donate(commands.Cog):
@@ -44,7 +48,7 @@ class Donate(commands.Cog):
         else:
             await ctx.send("Transaction failed. Please try again.")
 
-        print(f"Donate command executed by {ctx.author.display_name}.\n")
+        log.info("Donate command executed by %s.\n", ctx.author.display_name)
 
 
 async def setup(bot: CurrencyBot) -> None:

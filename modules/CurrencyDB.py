@@ -4,7 +4,6 @@ from modules.Database import Database
 
 
 class CurrencyDB:
-    CURRENCY_DB: ClassVar[str] = "currency.db"
     CURRENCY_TABLE: ClassVar[str] = "currencies"
 
     def __init__(self, database: Database) -> None:
@@ -16,9 +15,8 @@ class CurrencyDB:
                 f"""
                 CREATE TABLE IF NOT EXISTS {self.CURRENCY_TABLE}
                 (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    discord_id TEXT UNIQUE NOT NULL,
-                    balance    NUMBER      NOT NULL
+                    discord_id INTEGER PRIMARY KEY NOT NULL,
+                    balance    INTEGER     NOT NULL
                 )
                 """,
             )

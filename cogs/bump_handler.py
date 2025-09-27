@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import logging
 import os
 import random
@@ -16,11 +17,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# --- Configuration ---
-DISBOARD_BOT_ID = int(os.getenv("DISBOARD_BOT_ID"))
-BUMPER_ROLE_ID = int(os.getenv("BUMPER_ROLE_ID"))
-
-BUMP_REMINDER_DELAY_SECONDS = 2 * 60 * 60 - 2  # 2 hours (and 2 seconds early to get the person ready)
+# --- Constants ---
+BUMP_REMINDER_DELAY = datetime.timedelta(hours=2)
 
 
 class BumpHandlerCog(commands.Cog):
@@ -30,86 +28,146 @@ class BumpHandlerCog(commands.Cog):
         self.bot = bot
         self.currency_db: CurrencyDB = bot.currency_db
         self.user_db: UserDB = bot.user_db
+        self.reminder_task: asyncio.Task | None = None
+
+        self.disboard_bot_id = int(os.getenv("DISBOARD_BOT_ID"))
+        self.guild_id = int(os.getenv("GUILD_ID"))
+        self.bumper_role_id = int(os.getenv("BUMPER_ROLE_ID"))
+
+    async def cog_load(self) -> None:
+        """On cog load, find the last bump and process it to schedule a reminder."""
+        log.info("BumpHandlerCog loaded. Searching for the last bump...")
+        guild = await self.bot.fetch_guild(self.guild_id)
+        if not guild:
+            log.error("Could not find guild %d for reminder scheduling.", self.guild_id)
+            return
+
+        last_bump_message = await self._find_last_bump_message(guild)
+        if last_bump_message:
+            log.info("Found historical bump message %s. Processing it.", last_bump_message.id)
+            # Process the found message, but don't re-reward the user.
+            await self._process_bump(last_bump_message, is_new_bump=False)
+        else:
+            log.info("No recent bump message found. No reminder scheduled.")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        """Listen for new messages to detect a successful bump."""
-        if not message.guild or message.author.id != DISBOARD_BOT_ID:
+        """Listen for new messages to detect and process a successful bump."""
+        if message.guild and self._is_successful_bump_message(message):
+            log.info("Detected a new bump in message %s. Processing it.", message.id)
+            await self._process_bump(message, is_new_bump=True)
+
+    async def _process_bump(self, message: discord.Message, *, is_new_bump: bool) -> None:
+        """Unified method to handle all bump logic.
+
+        Args:
+            message: The successful bump message from Disboard.
+            is_new_bump: If True, grants a reward. If False, only schedules a reminder.
+
+        """
+        if not message.interaction_metadata:
+            log.warning("Bump message %s has no interaction metadata.", message.id)
             return
 
-        if not message.embeds:
-            return
+        bumper = message.interaction_metadata.user
+        channel = message.channel
 
-        embed = message.embeds[0]
-        if not embed.description:
-            return
-
-        # --- Rule 3: Parse Embed and Process Reward/Reminder ---
-        if "Bump done!" not in embed.description:
-            return
-
-        log.info("Detected a successful bump in message %s.", embed)
         try:
-            bumper_id = message.interaction_metadata.user.id
-            # Use message.guild.get_member for efficiency if user is in cache,
+            if is_new_bump:
+                reward = random.randint(50, 100)
+                await self.currency_db.add_money(bumper.id, reward)
+                log.info("Rewarded %s with $%d for bumping.", bumper.display_name, reward)
+                await channel.send(f"🎉 Thanks for bumping, {bumper.mention}! You've received **${reward}**.")
 
-            bumper: discord.User | discord.Member | None = message.guild.get_member(bumper_id)
-            if not bumper:  # otherwise fetch from API.
-                bumper: discord.User | discord.Member = await self.bot.fetch_user(bumper_id)
+            # --- Unified Reminder Scheduling ---
+            if is_new_bump:
+                delay_seconds = BUMP_REMINDER_DELAY.total_seconds()
+            else:
+                # Calculate remaining time for a historical bump
+                time_since_bump = discord.utils.utcnow() - message.created_at
+                remaining_delay = BUMP_REMINDER_DELAY - time_since_bump
+                delay_seconds = remaining_delay.total_seconds()
 
-            reward = random.randint(50, 100)
-
-            await self.currency_db.add_money(bumper_id, reward)
-            log.info("Rewarded %s with $%d for bumping.", bumper.display_name, reward)
-
-            await message.channel.send(
-                f"🎉 Thanks for bumping, {bumper.mention}! You've received **${reward}**.",
-            )
-
-            log.info("Scheduling a 2-hour bump reminder for %d.", BUMPER_ROLE_ID)
-            self._create_reminder_task(message.channel, bumper.mention)
+            await self._schedule_reminder(channel, bumper.mention, delay_seconds)
 
         except (discord.HTTPException, discord.Forbidden):
-            log.exception("Error processing bump reward and reminder.")
+            log.exception("Error processing bump message %s.", message.id)
 
-    def _create_reminder_task(
+    async def _schedule_reminder(
         self,
         channel: discord.TextChannel,
         last_bumper: str,
+        delay_seconds: float,
     ) -> None:
-        """Create a non-blocking background task for the bump reminder."""
-        task = asyncio.create_task(self._send_reminder(channel, last_bumper))
-        task.add_done_callback(
-            lambda t: (t.result() if t.exception() is None else log.exception("Reminder task failed")),
-        )
+        """Schedules or reschedules the bump reminder task."""
+        if self.reminder_task and not self.reminder_task.done():
+            self.reminder_task.cancel()
 
-    async def _send_reminder(
+        if delay_seconds <= 0:
+            log.info("Reminder delay is zero or negative, sending now.")
+            await self._send_reminder_message(channel, last_bumper)
+            return
+
+        log.info("Scheduling bump reminder in %.2f seconds.", delay_seconds)
+
+        async def reminder_coro() -> None:
+            await asyncio.sleep(delay_seconds)
+            await self._send_reminder_message(channel, last_bumper)
+
+        self.reminder_task = asyncio.create_task(reminder_coro())
+
+    async def _send_reminder_message(
         self,
         channel: discord.TextChannel,
-        last_bumper: str,
+        last_bumper_mention: str,
     ) -> None:
-        """Wait for the specified time and then sends a reminder."""
-        await asyncio.sleep(BUMP_REMINDER_DELAY_SECONDS)
+        """Construct and send the bump reminder message."""
         log.info("Sending bump reminder to #%s.", channel.name)
         try:
+            description = f"It's time to bump the server again! Use `/bump`.\n*Thanks to {last_bumper_mention} for the last one!*"
             reminder_embed = discord.Embed(
-                title="⏰ Time to Bump ⏰",
-                description=f"Thank you earlier {last_bumper}!",
+                title="⏰ Time to Bump! ⏰",
+                description=description,
                 color=discord.Colour.blue(),
             )
-            role = channel.guild.get_role(BUMPER_ROLE_ID)
-            if role:
-                await channel.send(f"Hey {await ping_online_role(role, self.user_db)}", embed=reminder_embed)
+            role_to_ping = channel.guild.get_role(self.bumper_role_id)
+            ping_text = await ping_online_role(role_to_ping, self.user_db) if role_to_ping else ""
+
+            await channel.send(content=ping_text, embed=reminder_embed)
         except (discord.HTTPException, discord.Forbidden):
             log.exception("Failed to send reminder to %s.", channel.name)
+
+    async def _find_last_bump_message(self, guild: discord.Guild) -> discord.Message | None:
+        """Scan channels to find the last successful bump message."""
+        # fetch_channels because cache isn't yet populated
+        candidate_channels = [c for c in (await guild.fetch_channels()) if "bump" in c.name.lower()]
+        latest_bump_message: discord.Message | None = None
+
+        for channel in candidate_channels:
+            try:
+                async for message in channel.history(limit=50):
+                    if self._is_successful_bump_message(message):
+                        if not latest_bump_message or message.created_at > latest_bump_message.created_at:
+                            latest_bump_message = message
+                        # Since history is newest-first, we can stop after finding the first one.
+                        break
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+        return latest_bump_message
+
+    def _is_successful_bump_message(self, message: discord.Message) -> bool:
+        """Check if a message is a successful Disboard bump."""
+        return (
+            message.author.id == self.disboard_bot_id
+            and message.embeds
+            and message.embeds[0].description
+            and "Bump done!" in message.embeds[0].description
+        )
 
 
 async def setup(bot: "CurrencyBot") -> None:
     """Load the cog."""
-    # Ensure DISBOARD_BOT_ID is valid before loading
-    if not isinstance(DISBOARD_BOT_ID, int) or DISBOARD_BOT_ID == 0:
-        log.error(
-            "BumpHandlerCog not loaded because DISBOARD_BOT_ID is not configured correctly.",
-        )
+    if not os.getenv("DISBOARD_BOT_ID"):
+        log.error("BumpHandlerCog not loaded: DISBOARD_BOT_ID is not configured.")
         return
     await bot.add_cog(BumpHandlerCog(bot))

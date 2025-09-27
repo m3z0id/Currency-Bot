@@ -43,8 +43,8 @@ class ServerStats(commands.Cog):
         """Handle the statistics update for a single guild."""
         log.info("Processing guild: %s (%s)", guild.name, guild.id)
 
-        # Count members who have at least one role
-        all_members_count = len(
+        # Count members who have at least one role (failed or passed captcha)
+        members_count = len(
             [m for m in guild.members if not m.bot and m.flags.completed_onboarding and len(m.roles) > 1],
         )
 
@@ -74,7 +74,7 @@ class ServerStats(commands.Cog):
             # Update the channel name if necessary
             try:
                 if channel.name.startswith("All members:"):
-                    new_name = f"All members: {all_members_count}"
+                    new_name = f"All members: {members_count}"
                     if channel.name != new_name:
                         await channel.edit(
                             name=new_name,
@@ -83,7 +83,7 @@ class ServerStats(commands.Cog):
                         log.info(
                             "Updated 'All members' count for '%s' to %s.",
                             guild.name,
-                            all_members_count,
+                            members_count,
                         )
 
                 elif channel.name.startswith("Tag Users:") and TAG_ROLE_ID:

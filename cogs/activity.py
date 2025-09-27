@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime
 
 import discord
 from discord.ext import commands, tasks
@@ -14,7 +13,7 @@ class Activity(commands.Cog):
 
     def __init__(self, bot: CurrencyBot) -> None:
         self.bot = bot
-        self.activity_cache: dict[int, str] = {}
+        self.activity_cache: set[int] = set()
         self.flush_activity_cache.start()
 
     def cog_unload(self) -> None:
@@ -28,7 +27,7 @@ class Activity(commands.Cog):
             return
 
         if message.guild:
-            self.activity_cache[message.author.id] = datetime.now().isoformat()
+            self.activity_cache.add(message.author.id)
             log.debug("Cached activity for user %d", message.author.id)
 
     @tasks.loop(seconds=60)
@@ -38,7 +37,7 @@ class Activity(commands.Cog):
             return
 
         try:
-            await self.bot.user_db.bulk_update_last_message(self.activity_cache)
+            await self.bot.user_db.update_active_users(list(self.activity_cache))
             log.info(
                 "Flushed %d user activities to database",
                 len(self.activity_cache),
