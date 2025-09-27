@@ -1,4 +1,5 @@
-# membercount_simple.py
+#!/usr/bin/env python3
+"""Populate the environment variables then run this to populate counts.json."""
 
 import csv
 import json
@@ -15,7 +16,7 @@ import requests
 # --- Configuration ---
 try:
     BOT_TOKEN = os.environ["TOKEN"]
-    CHANNEL_ID = os.environ["CHANNEL_ID"]
+    CHANNEL_ID = os.environ["JOIN_LEAVE_LOG_CHANNEL_ID"]
     CARL_BOT_ID = os.environ["CARL_BOT_ID"]
     KIWI_BOT_ID = os.environ["KIWI_BOT_ID"]
 except KeyError as e:
