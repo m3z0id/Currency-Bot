@@ -115,7 +115,7 @@ def save_results(data: list[tuple[datetime, int]]) -> None:
 
     # --- Save CSV ---
     csv_path = output_dir / "counts.csv"
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["date", "count"])
         writer.writerows([date.strftime("%Y-%m-%dT%H:%M"), count] for date, count in data)
@@ -124,7 +124,7 @@ def save_results(data: list[tuple[datetime, int]]) -> None:
     # --- Save JSON ---
     json_path = output_dir / "counts.json"
     json_data = [{"date": date.strftime("%Y-%m-%dT%H:%M"), "value": value} for date, value in reversed(data)]
-    with open(json_path, "w", encoding="utf-8") as f:
+    with json_path.open("w", encoding="utf-8") as f:
         json.dump(json_data, f, indent=2)
     print(f"Saved {len(data)} records to {json_path}")
 
