@@ -163,7 +163,7 @@ class UserDB:
                     daily_reminder_preference = CASE
                         WHEN daily_reminder_preference = 'ONCE' THEN 'NEVER'
                         ELSE daily_reminder_preference END
-                """,
+                """,  # noqa: S608
             )
             await conn.commit()
             return user_ids_to_remind
