@@ -73,7 +73,11 @@ class CurrencyBot(commands.Bot):
 
     async def on_error(self, event_method: str, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
         """Log unhandled exceptions."""
-        log.exception("Unhandled exception in %s", event_method, extra={"*args": args, "**kwargs": kwargs})
+        log.exception(
+            "Unhandled exception in %s",
+            event_method,
+            extra={"*args": args, "**kwargs": kwargs},
+        )
 
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
         """Log unhandled command exceptions."""

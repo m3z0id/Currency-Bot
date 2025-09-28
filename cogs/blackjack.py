@@ -431,7 +431,13 @@ class BlackjackCog(commands.Cog):
 
         # This factory creates a default stat dict for a new user
         def user_stats_factory() -> dict[str, int]:
-            return {"wins": 0, "losses": 0, "pushes": 0, "blackjacks": 0, "net_credits": 0}
+            return {
+                "wins": 0,
+                "losses": 0,
+                "pushes": 0,
+                "blackjacks": 0,
+                "net_credits": 0,
+            }
 
         # Initialize as a nested defaultdict
         self.bot.blackjack_stats: defaultdict[int, defaultdict[int, dict[str, int]]] = defaultdict(
@@ -443,7 +449,7 @@ class BlackjackCog(commands.Cog):
         description="Start a private game of Blackjack.",
     )
     @app_commands.describe(bet="The amount of credits you want to bet.")
-    async def blackjack(self, ctx: commands.Context, bet: commands.Range[int, 1]) -> None:
+    async def blackjack(self, ctx: commands.Context, bet: commands.Range[int, 1]) -> None:  # ty: ignore [invalid-type-form]
         if (balance := await self.bot.currency_db.get_balance(ctx.author.id)) < bet:
             await ctx.send(
                 f"Insufficient funds! You tried to bet ${bet:,} but only have ${balance:,}.",
@@ -505,7 +511,7 @@ class BlackjackCog(commands.Cog):
             color=discord.Colour.gold(),
         )
         for i, (user_id, stats) in enumerate(sorted_players[:10]):
-            user = ctx.guild.get_member(user_id)
+            user = await ctx.guild.fetch_member(user_id)
             user_display = user.display_name if user else f"User ID: {user_id}"
             embed.add_field(
                 name=f"{i + 1}. {user_display}",

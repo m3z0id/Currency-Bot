@@ -61,6 +61,7 @@ class BumpHandlerCog(commands.Cog):
         """Unified method to handle all bump logic.
 
         Args:
+        ----
             message: The successful bump message from Disboard.
             is_new_bump: If True, grants a reward. If False, only schedules a reminder.
 
@@ -130,7 +131,7 @@ class BumpHandlerCog(commands.Cog):
                 description=description,
                 color=discord.Colour.blue(),
             )
-            role_to_ping = channel.guild.get_role(self.bumper_role_id)
+            role_to_ping = await channel.guild.fetch_role(self.bumper_role_id)
             ping_text = await ping_online_role(role_to_ping, self.user_db) if role_to_ping else ""
 
             await channel.send(content=ping_text, embed=reminder_embed)

@@ -24,7 +24,7 @@ class Donate(commands.Cog):
         self,
         ctx: commands.Context,
         receiver: discord.Member,
-        amount: commands.Range[int, 1],
+        amount: commands.Range[int, 1],  # ty: ignore [invalid-type-form]
     ) -> None:
         # Optional: Add checks to prevent donating to self or bots
         if receiver.id == ctx.author.id:

@@ -219,14 +219,21 @@ class Daily(commands.Cog):
                 await user.send(reminder_message)
                 success_count += 1
             except (discord.Forbidden, discord.NotFound):
-                log.warning("Could not send reminder to user %d (DMs disabled or user not found).", user_id)
+                log.warning(
+                    "Could not send reminder to user %d (DMs disabled or user not found).",
+                    user_id,
+                )
             except discord.HTTPException:
                 log.exception("Failed to send reminder to user %d due to an HTTP error.", user_id)
             finally:
                 # Wait for a short duration between messages to respect rate limits.
                 await asyncio.sleep(1)
 
-        log.info("Successfully sent %d out of %d daily reminders.", success_count, total_count)
+        log.info(
+            "Successfully sent %d out of %d daily reminders.",
+            success_count,
+            total_count,
+        )
 
     @commands.hybrid_command(name="daily", description="Claim your daily currency.")
     async def daily(self, ctx: commands.Context) -> None:

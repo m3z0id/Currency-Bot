@@ -112,7 +112,8 @@ class UserDB:
         their `has_claimed_daily` status from 0 to 1. This is done in a single
         transaction to prevent race conditions.
 
-        Returns:
+        Returns
+        -------
             bool: True if the claim was successful, False if already claimed.
 
         """
@@ -139,7 +140,8 @@ class UserDB:
         2. Resets `has_claimed_daily` to 0 for ALL users.
         3. Resets `daily_reminder_preference` to 'NEVER' for users who had it set to 'ONCE'.
 
-        Returns:
+        Returns
+        -------
             A list of user IDs to be reminded.
 
         """
@@ -161,7 +163,7 @@ class UserDB:
                     daily_reminder_preference = CASE
                         WHEN daily_reminder_preference = 'ONCE' THEN 'NEVER'
                         ELSE daily_reminder_preference END
-                """,  # noqa: S608
+                """,
             )
             await conn.commit()
             return user_ids_to_remind

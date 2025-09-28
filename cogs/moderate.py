@@ -130,9 +130,17 @@ class Moderate(commands.Cog):
         try:
             await member.send(embed=embed)
         except discord.Forbidden:
-            log.warning("Failed to DM %s (%s) - they may have DMs disabled.", member.display_name, member.id)
+            log.warning(
+                "Failed to DM %s (%s) - they may have DMs disabled.",
+                member.display_name,
+                member.id,
+            )
         except discord.HTTPException:
-            log.exception("Failed to DM %s (%s) due to an HTTP error.", member.display_name, member.id)
+            log.exception(
+                "Failed to DM %s (%s) due to an HTTP error.",
+                member.display_name,
+                member.id,
+            )
 
     # --- MODERATION COMMANDS ---
 
@@ -245,7 +253,13 @@ class Moderate(commands.Cog):
                 f"✅ **{member.display_name}** has been timed out until <t:{int(end_timestamp.timestamp())}:F>.",
                 ephemeral=True,
             )
-            log.info("%s timed out %s for %s. Reason: %s", interaction.user, member, duration, reason)
+            log.info(
+                "%s timed out %s for %s. Reason: %s",
+                interaction.user,
+                member,
+                duration,
+                reason,
+            )
         except discord.Forbidden:
             await interaction.response.send_message(
                 "❌ I don't have the required permissions to timeout this member.",
@@ -282,7 +296,12 @@ class Moderate(commands.Cog):
                 f"✅ The timeout for **{member.display_name}** has been removed.",
                 ephemeral=True,
             )
-            log.info("%s removed timeout from %s. Reason: %s", interaction.user, member, reason)
+            log.info(
+                "%s removed timeout from %s. Reason: %s",
+                interaction.user,
+                member,
+                reason,
+            )
         except discord.Forbidden:
             await interaction.response.send_message(
                 "❌ I don't have the required permissions to remove this timeout.",
@@ -312,7 +331,7 @@ class Moderate(commands.Cog):
             )
             return
 
-        muted_role = interaction.guild.get_role(MUTED_ROLE_ID)
+        muted_role = await interaction.guild.fetch_role(MUTED_ROLE_ID)
         if not muted_role:
             await interaction.response.send_message(
                 "The configured muted role could not be found on this server. It may have been deleted.",
@@ -361,7 +380,7 @@ class Moderate(commands.Cog):
             )
             return
 
-        muted_role = interaction.guild.get_role(MUTED_ROLE_ID)
+        muted_role = await interaction.guild.fetch_role(MUTED_ROLE_ID)
         if not muted_role:
             await interaction.response.send_message(
                 "The configured muted role could not be found on this server. It may have been deleted.",
