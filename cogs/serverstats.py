@@ -37,7 +37,7 @@ class ServerStats(commands.Cog):
             tag_members_count = 0
 
         # Count members who have at least one role (failed or passed captcha)
-        members_count = len(
+        member_count = len(
             [m for m in guild.members if not m.bot and m.flags.completed_onboarding and len(m.roles) > 1],
         )
 
@@ -55,7 +55,7 @@ class ServerStats(commands.Cog):
             # Update the channel name if necessary
             try:
                 if channel.name.startswith("All members:"):
-                    new_name = f"All members: {members_count}"
+                    new_name = f"All members: {member_count}"
                     if channel.name != new_name:
                         await channel.edit(
                             name=new_name,
@@ -64,7 +64,7 @@ class ServerStats(commands.Cog):
                         log.info(
                             "Updated 'All members' count for '%s' to %s.",
                             guild.name,
-                            members_count,
+                            member_count,
                         )
 
                 elif channel.name.startswith("Tag Users:"):

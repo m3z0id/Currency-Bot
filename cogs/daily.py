@@ -16,6 +16,8 @@ from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands, tasks
 
+from modules.enums import StatName
+
 if TYPE_CHECKING:
     # This avoids circular imports while providing type hints for the bot class
     from modules.CurrencyBot import CurrencyBot
@@ -249,11 +251,11 @@ class Daily(commands.Cog):
 
         # Simplified reward logic: 1% chance for a jackpot, 99% for a standard reward.
         daily_mon = (
-            random.randint(101, 10000) if random.random() < 0.01 else random.randint(50, 100)  # noqa: PLR2004
+            random.randint(101, 2000) if random.random() < 0.01 else random.randint(50, 100)  # noqa: PLR2004
         )
 
-        await self.bot.currency_db.add_money(ctx.author.id, daily_mon)
-        new_balance = await self.bot.currency_db.get_balance(ctx.author.id)
+        await self.bot.stats_db.increment_stat(ctx.author.id, StatName.CURRENCY, daily_mon)
+        new_balance = await self.bot.stats_db.get_stat(ctx.author.id, StatName.CURRENCY)
 
         log.info(
             "User %s claimed $%s, new balance is $%s",

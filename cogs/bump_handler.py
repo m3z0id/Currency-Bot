@@ -9,16 +9,17 @@ import discord
 from discord.ext import commands
 
 from modules.discord_utils import ping_online_role
+from modules.enums import StatName
 
 if TYPE_CHECKING:
     from modules.CurrencyBot import CurrencyBot
-    from modules.CurrencyDB import CurrencyDB
     from modules.UserDB import UserDB
 
 log = logging.getLogger(__name__)
 
 # --- Constants ---
 BUMP_REMINDER_DELAY = datetime.timedelta(hours=2)
+BACKUP_REMINDER_DELAY = datetime.timedelta(minutes=10)
 
 
 class BumpHandlerCog(commands.Cog):
@@ -26,13 +27,14 @@ class BumpHandlerCog(commands.Cog):
 
     def __init__(self, bot: "CurrencyBot") -> None:
         self.bot = bot
-        self.currency_db: CurrencyDB = bot.currency_db
         self.user_db: UserDB = bot.user_db
         self.reminder_task: asyncio.Task | None = None
 
         self.disboard_bot_id = int(os.getenv("DISBOARD_BOT_ID"))
         self.guild_id = int(os.getenv("GUILD_ID"))
         self.bumper_role_id = int(os.getenv("BUMPER_ROLE_ID"))
+        backup_bumper_role_id_str = os.getenv("BACKUP_BUMPER_ROLE_ID")
+        self.backup_bumper_role_id: int | None = int(backup_bumper_role_id_str) if backup_bumper_role_id_str else None
 
     async def cog_load(self) -> None:
         """On cog load, find the last bump and process it to schedule a reminder."""
@@ -76,7 +78,9 @@ class BumpHandlerCog(commands.Cog):
         try:
             if is_new_bump:
                 reward = random.randint(50, 100)
-                await self.currency_db.add_money(bumper.id, reward)
+                # Reward Currency
+                await self.bot.stats_db.increment_stat(bumper.id, StatName.CURRENCY, reward)
+                await self.bot.stats_db.increment_stat(bumper.id, StatName.BUMPS, 1)
                 log.info("Rewarded %s with $%d for bumping.", bumper.display_name, reward)
                 await channel.send(f"🎉 Thanks for bumping, {bumper.mention}! You've received **${reward}**.")
 
@@ -113,7 +117,24 @@ class BumpHandlerCog(commands.Cog):
 
         async def reminder_coro() -> None:
             await asyncio.sleep(delay_seconds)
-            await self._send_reminder_message(channel, last_bumper)
+
+            # Stage 1: Primary Reminder
+            await self._send_reminder_message(
+                channel,
+                last_bumper,
+                self.bumper_role_id,
+                is_backup=False,
+            )
+
+            # Stage 2: Backup Reminder (if configured)
+            if self.backup_bumper_role_id:
+                await asyncio.sleep(BACKUP_REMINDER_DELAY.total_seconds())
+                await self._send_reminder_message(
+                    channel,
+                    last_bumper,
+                    self.backup_bumper_role_id,
+                    is_backup=True,
+                )
 
         self.reminder_task = asyncio.create_task(reminder_coro())
 
@@ -121,22 +142,30 @@ class BumpHandlerCog(commands.Cog):
         self,
         channel: discord.TextChannel,
         last_bumper_mention: str,
+        role_id: int,
+        *,
+        is_backup: bool = False,
     ) -> None:
         """Construct and send the bump reminder message."""
-        log.info("Sending bump reminder to #%s.", channel.name)
+        log.info("Sending %s bump reminder to #%s.", "backup" if is_backup else "primary", channel.name)
         try:
-            description = f"It's time to bump the server again! Use `/bump`.\n*Thanks to {last_bumper_mention} for the last one!*"
-            reminder_embed = discord.Embed(
-                title="⏰ Time to Bump! ⏰",
-                description=description,
-                color=discord.Colour.blue(),
-            )
-            role_to_ping = await channel.guild.fetch_role(self.bumper_role_id)
+            if is_backup:
+                title = "⚠️ Still Need a Bump! ⚠️"
+                prefix = "It's been a while! Can a backup bumper help out?"
+                color = discord.Colour.orange()
+            else:
+                title = "⏰ Time to Bump! ⏰"
+                prefix = "It's time to bump the server again!"
+                color = discord.Colour.blue()
+
+            description = f"{prefix} Use `/bump`.\n*Thanks to {last_bumper_mention} for the last one!*"
+            reminder_embed = discord.Embed(title=title, description=description, color=color)
+            role_to_ping = await channel.guild.fetch_role(role_id)
             ping_text = await ping_online_role(role_to_ping, self.user_db) if role_to_ping else ""
 
             await channel.send(content=ping_text, embed=reminder_embed)
         except (discord.HTTPException, discord.Forbidden):
-            log.exception("Failed to send reminder to %s.", channel.name)
+            log.exception("Failed to send %s reminder to %s.", "backup" if is_backup else "primary", channel.name)
 
     async def _find_last_bump_message(self, guild: discord.Guild) -> discord.Message | None:
         """Scan channels to find the last successful bump message."""

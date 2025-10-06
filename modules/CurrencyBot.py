@@ -13,8 +13,8 @@ from discord.ext.commands import (
     NoEntryPointError,
 )
 
-from modules.CurrencyDB import CurrencyDB
 from modules.Database import Database
+from modules.StatsDB import StatsDB
 from modules.TaskDB import TaskDB
 from modules.UserDB import UserDB
 
@@ -29,6 +29,7 @@ class CurrencyBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
+        intents.presences = True
         super().__init__(command_prefix="!", intents=intents, help_command=None)
 
     # Event to notify when the bot has connected
@@ -37,12 +38,12 @@ class CurrencyBot(commands.Bot):
 
         # Initialize the database first
         self.database: Database = Database()
-        self.currency_db = CurrencyDB(self.database)
+        self.stats_db = StatsDB(self.database)
         self.user_db = UserDB(self.database)
         self.task_db = TaskDB(self.database)
 
         # AWAIT the post-initialization tasks to ensure tables are created
-        await self.currency_db.post_init()
+        await self.stats_db.post_init()
         await self.user_db.post_init()
         await self.task_db.post_init()
         log.info("All database tables initialized.")

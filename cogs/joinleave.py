@@ -76,10 +76,15 @@ class JoinLeaveLogCog(commands.Cog):
         if member.bot:
             title += " [BOT]"
 
+        # Count members who have at least one role (failed or passed captcha)
+        member_count = len(
+            [m for m in member.guild.members if not m.bot and m.flags.completed_onboarding and len(m.roles) > 1],
+        )
+
         # Prepare description lines for the embed
         date = int(member.created_at.timestamp())
         description = [
-            f"{member.mention} was the **{member.guild.member_count}th** member to join.",
+            f"{member.mention} was the **{member_count}th** member to join.",
             f"Account created: <t:{date}:F> (<t:{date}:R>)",
         ]
 

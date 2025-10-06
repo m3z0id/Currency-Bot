@@ -5,6 +5,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from modules.CurrencyBot import CurrencyBot
+from modules.enums import StatName
 
 log = logging.getLogger(__name__)
 
@@ -31,13 +32,14 @@ class Donate(commands.Cog):
             await ctx.send("You cannot donate to yourself.", ephemeral=True)
             return
 
-        if (balance := await self.bot.currency_db.get_balance(ctx.author.id)) < amount:
+        if (balance := await self.bot.stats_db.get_stat(ctx.author.id, StatName.CURRENCY)) < amount:
             await ctx.send(f"Insufficient funds! You have ${balance}")
             return
 
-        success = await self.bot.currency_db.transfer_money(
+        success = await self.bot.stats_db.transfer_stat(
             sender_id=ctx.author.id,
             receiver_id=receiver.id,
+            stat=StatName.CURRENCY,
             amount=amount,
         )
 

@@ -7,10 +7,11 @@ from discord import app_commands
 from discord.ext import commands
 
 from modules.CurrencyBot import CurrencyBot
+from modules.enums import StatName
 
 log = logging.getLogger(__name__)
 
-cooldown = 300
+cooldown = 3600 * 6  # Every 6 hours
 
 
 class Sell(commands.Cog):
@@ -53,8 +54,12 @@ class Sell(commands.Cog):
             await ctx.send(f"Invalid {item_type}", ephemeral=True)
             return
 
-        random_num = random.randint(1, 100)
-        await self.bot.currency_db.add_money(ctx.author.id, random_num)
+        if random.choice((True, False)):
+            await ctx.send("You got caught by the police and made no money.")
+            return
+
+        random_num = random.randint(1, 20)
+        await self.bot.stats_db.increment_stat(ctx.author.id, StatName.CURRENCY, random_num)
 
         log.info(
             "User %s has sold wndx2's %s for %d.",
