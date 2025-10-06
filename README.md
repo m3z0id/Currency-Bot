@@ -1,59 +1,72 @@
 # KiwiBot
 
-This bot adds an economy system, automated role management, and logging for staff.
+KiwiBot is a comprehensive Discord bot an economy, games, moderation tools, and automated management features.
 
 ---
 
-## For Server Members
+## Features for Server Members
 
-### Economy Commands 💰
+### Economy & General Commands 💰
 
-- **`/bal [member]`**: Check your current wallet balance or view the balance of another member.
-- **`/daily`**: Claim your randomized currency reward! You can also click the "Remind me" button to get a DM when your next claim is ready.
-- **`/donate <member> <amount>`**: Give your money to another user.
-- **`/sell [limb]`** and **`/harvest [organ]`**: shh just earn your money.
+- **`/bal [member]`**: Check your wallet balance and bump count, or check the stats of another member.
+- **`/daily`**: Claim your daily currency reward. You have a chance to hit a massive jackpot! Use the buttons to share your winnings or set a reminder preference (once, always, or never).
+- **`/donate <member> <amount>`**: Share the wealth by giving money to another user.
+- **`/leaderboard <stat>`**: See who's on top! Displays the server leaderboard for the richest users or the most dedicated bumpers.
+- **`/sell [limb]`** & **`/harvest [organ]`**: Engage in... _creative_ capitalism. A risky way for earning extra cash.
+- **`/blackjack <bet>`**: Feeling lucky? Start a game of Blackjack!
 
 ### Automatic Rewards ✨
 
-- **Bumping**: If the server supports bumping, you'll automatically receive a random currency reward every time you successfully bump.
+- **Bumping**: If your server uses Disboard, you'll automatically earn a random currency reward and climb the bump leaderboard every time you successfully `/bump` the server.
 
 ---
 
-## For Staff & Developers
+## Features for Staff & Developers
 
-### Additional Features
+### Moderation Suite 🛡️
+
+All moderation actions are slash commands and are automatically logged to your designated mod-log channel.
+
+- **`/moderate ban <member>`**: Bans a user, with options to delete their recent message history.
+- **`/moderate kick <member>`**: Kicks a user from the server.
+- **`/moderate timeout <member> <duration>`**: Times out a user for a specified duration (e.g., `10m`, `2h`, `7d`).
+- **`/moderate untimeout <member>`**: Removes an active timeout from a user.
+- **`/moderate mute <member>`**: Mutes a user by assigning the configured `MUTED_ROLE_ID`.
+- **`/moderate unmute <member>`**: Removes the muted role from a user.
+
+### Automation & Management ⚙️
 
 - **Automated Logging**:
-  - **Mod Log**: Automatically logs moderation actions (bans, unbans, kicks, timeouts) to a designated channel.
-  - **Join/Leave Log**: Announce when members join or leave the server in a specific channel.
+  - **Mod Log**: A detailed feed of all moderation actions (bans, kicks, mutes, timeouts), including the responsible moderator and provided reason.
+  - **Join/Leave Log**: A clean announcement log for when members join, rejoin, or leave the server.
+- **Server Stats Channels**: Automatically updates the names of designated voice channels to display live server statistics like the total member count.
 - **Automatic Role Pruning**:
-  - **Inactive Members**: Removes specified roles from users who have been inactive for a configurable number of days.
-  - **Old Custom Roles**: Deletes roles with a `Custom:` prefix that are older than 30 days to keep your role list clean.
+  - **Inactive Members**: Keeps your member list tidy by removing specified roles from users who have been inactive for a configurable period. It also cleans up common cosmetic roles (e.g., `Colour:`, `Ping:`, `Gradient:`).
+  - **Old Custom Roles**: Automatically deletes roles prefixed with `Custom:` after 30 days to prevent role clutter.
+- **Smart Bump Reminders**: The bot pings the `BUMPER_ROLE_ID` two hours after a successful bump. If no one bumps after 10 more minutes, it pings the `BACKUP_BUMPER_ROLE_ID`.
 
 ### Setup & Installation
 
-#### 1\. Configuration
+#### 1. Configuration
 
-The bot is configured using a `.env` file in the root directory. Create this file and add the following variables:
+The bot is configured using a `.env` file in the project's root directory. Create this file and add the following variables:
 
-- `TOKEN`: Your unique Discord bot token.
-- `GUILD_ID`: The ID of the server where the bot will operate.
-- `ROLES_TO_PRUNE`: A comma-separated list of role IDs to be removed from inactive users.
-- `INACTIVITY_DAYS`: The number of days a user must be inactive to have their roles pruned.
-- `DISBOARD_BOT_ID`: The channel where bumps occur and the ID of the bump bot for the reward system.
-- `JOIN_LEAVE_LOG_CHANNEL_ID`: The channel where member join/leave messages will be sent.
-- `MOD_CHANNEL_ID`: The channel for logging moderation actions.
+```dotenv
+# --- Core Bot Settings ---
+TOKEN=YOUR_DISCORD_BOT_TOKEN_HERE
+GUILD_ID=YOUR_SERVER_ID_HERE
 
-#### 2\. Running the Bot
+# --- Economy & Bumping ---
+DISBOARD_BOT_ID=ID_OF_THE_BUMP_BOT
+BUMPER_ROLE_ID=ID_OF_PRIMARY_BUMPER_ROLE
+BACKUP_BUMPER_ROLE_ID=ID_OF_BACKUP_BUMPER_ROLE # Optional
 
-This project uses `uv` for dependency management and execution.
+# --- Logging Channels ---
+JOIN_LEAVE_LOG_CHANNEL_ID=CHANNEL_ID_FOR_JOIN_LEAVE_LOGS
+MOD_CHANNEL_ID=CHANNEL_ID_FOR_MODERATION_LOGS
 
-1.  Get `uv` by following the installation instructions at [https://docs.astral.sh/uv](https://docs.astral.sh/uv).
-2.  Run the bot from your terminal. `uv` will automatically install the required dependencies from `pyproject.toml` and run the script.
-    ```shell
-    uv run main.py
-    ```
-
-### Contributing
-
-See `CONTRIBUTING.md` before contributing code.
+# --- Role Management ---
+ROLES_TO_PRUNE=ID_ONE,ID_TWO,ID_THREE # Comma-separated list of role IDs
+INACTIVITY_DAYS=14 # Days until a user is considered inactive (default is 14)
+MUTED_ROLE_ID=ID_OF_YOUR_MUTED_ROLE # Required for /mute and /unmute
+```
