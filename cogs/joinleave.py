@@ -1,12 +1,11 @@
 import logging
-import os
 from typing import TYPE_CHECKING
 
 import discord
 from discord.ext import commands
 
 if TYPE_CHECKING:
-    from modules.CurrencyBot import CurrencyBot
+    from modules.KiwiBot import KiwiBot
 
 log = logging.getLogger(__name__)
 
@@ -14,7 +13,7 @@ log = logging.getLogger(__name__)
 class JoinLeaveLogCog(commands.Cog):
     """A cog for logging member join and leave events to a specified channel."""
 
-    def __init__(self, bot: "CurrencyBot", channel_id: int) -> None:
+    def __init__(self, bot: "KiwiBot", channel_id: int) -> None:
         self.bot = bot
         self.channel_id = channel_id
         self.log_channel: discord.TextChannel | None = None
@@ -82,10 +81,10 @@ class JoinLeaveLogCog(commands.Cog):
         )
 
         # Prepare description lines for the embed
-        date = int(member.created_at.timestamp())
         description = [
             f"{member.mention} was the **{member_count}th** member to join.",
-            f"Account created: <t:{date}:F> (<t:{date}:R>)",
+            f"Account created: {discord.utils.format_dt(member.created_at, 'F')} \
+({discord.utils.format_dt(member.created_at, 'R')})",
         ]
 
         await self._log_event(member, title, color, description)
@@ -103,14 +102,12 @@ class JoinLeaveLogCog(commands.Cog):
         roles = [r.mention for r in member.roles if r.id != member.guild.default_role.id]
         roles_str = " ".join(roles) if roles else "None"
 
-        # Get the join timestamp to show how long they were a member
-        joined_timestamp = int(member.joined_at.timestamp()) if member.joined_at else None
-
         # Prepare description lines
         description = [f"{member.mention} has left the server."]
-        if joined_timestamp:
+        if member.joined_at:
             description.append(
-                f"**Joined:** <t:{joined_timestamp}:F> (<t:{joined_timestamp}:R>)",
+                f"**Joined:** {discord.utils.format_dt(member.joined_at, 'F')} \
+({discord.utils.format_dt(member.joined_at, 'R')})",
             )
 
         description.append(f"**Roles:** {roles_str}")
@@ -118,19 +115,12 @@ class JoinLeaveLogCog(commands.Cog):
         await self._log_event(member, title, color, description)
 
 
-async def setup(bot: "CurrencyBot") -> None:
+async def setup(bot: "KiwiBot") -> None:
     """Add the cog to the bot."""
-    channel_id_str = os.getenv("JOIN_LEAVE_LOG_CHANNEL_ID")
-    if not channel_id_str:
+    if not bot.config.join_leave_log_channel_id:
         log.warning(
-            "JOIN_LEAVE_LOG_CHANNEL_ID environment variable not set. JoinLeaveLogCog will not be loaded.",
+            "JOIN_LEAVE_LOG_CHANNEL_ID is not configured. JoinLeaveLogCog will not be loaded.",
         )
         return
 
-    try:
-        channel_id = int(channel_id_str)
-        await bot.add_cog(JoinLeaveLogCog(bot, channel_id))
-    except ValueError:
-        log.exception(
-            "JOIN_LEAVE_LOG_CHANNEL_ID is not a valid integer. JoinLeaveLogCog will not be loaded.",
-        )
+    await bot.add_cog(JoinLeaveLogCog(bot, bot.config.join_leave_log_channel_id))

@@ -3,12 +3,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from modules.CurrencyBot import CurrencyBot
 from modules.enums import StatName
+from modules.KiwiBot import KiwiBot
 
 
 class Leaderboard(commands.Cog):
-    def __init__(self, bot: CurrencyBot) -> None:
+    def __init__(self, bot: KiwiBot) -> None:
         self.bot = bot
 
     @app_commands.command(name="leaderboard", description="Displays the server leaderboard for a specific stat.")
@@ -38,12 +38,7 @@ class Leaderboard(commands.Cog):
 
         description = []
         for rank, (user_id, value) in enumerate(top_users, 1):
-            try:
-                member = await interaction.guild.fetch_member(user_id)
-                user_display = member.mention
-            except discord.NotFound:
-                user_display = f"*(User Not Found: `{user_id}`)*"
-
+            user_display = f"<@{user_id}>"
             prefix = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"**{rank}.**")
             description.append(f"{prefix} {user_display}: `{value:,}`")
 
@@ -51,5 +46,5 @@ class Leaderboard(commands.Cog):
         await interaction.followup.send(embed=embed)
 
 
-async def setup(bot: CurrencyBot) -> None:
+async def setup(bot: KiwiBot) -> None:
     await bot.add_cog(Leaderboard(bot))

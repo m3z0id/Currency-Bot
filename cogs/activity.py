@@ -3,7 +3,7 @@ import logging
 import discord
 from discord.ext import commands, tasks
 
-from modules.CurrencyBot import CurrencyBot
+from modules.KiwiBot import KiwiBot
 
 log = logging.getLogger(__name__)
 
@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 class Activity(commands.Cog):
     """Cog to handle user activity tracking and database updates."""
 
-    def __init__(self, bot: CurrencyBot) -> None:
+    def __init__(self, bot: KiwiBot) -> None:
         self.bot = bot
         self.activity_cache: set[int] = set()
         self.flush_activity_cache.start()
@@ -20,15 +20,25 @@ class Activity(commands.Cog):
         """Cancel the background task when the cog is unloaded."""
         self.flush_activity_cache.cancel()
 
+    def _cache_user_activity(self, user: discord.User | discord.Member) -> None:
+        """Add a user to the activity cache."""
+        if user.bot:
+            return
+
+        self.activity_cache.add(user.id)
+        log.debug("Cached activity for user %d", user.id)
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         """Listen to messages to track user activity."""
-        if message.author.bot:
-            return
-
         if message.guild:
-            self.activity_cache.add(message.author.id)
-            log.debug("Cached activity for user %d", message.author.id)
+            self._cache_user_activity(message.author)
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Listen to interactions to track user activity."""
+        if interaction.guild and interaction.user:
+            self._cache_user_activity(interaction.user)
 
     @tasks.loop(seconds=60)
     async def flush_activity_cache(self) -> None:
@@ -43,10 +53,10 @@ class Activity(commands.Cog):
                 len(self.activity_cache),
             )
             self.activity_cache.clear()
-        except (discord.HTTPException, ConnectionError, OSError):
+        except Exception:
             log.exception("Error in flush_activity_cache background task")
 
 
-async def setup(bot: CurrencyBot) -> None:
+async def setup(bot: KiwiBot) -> None:
     """Add the cog to the bot."""
     await bot.add_cog(Activity(bot))

@@ -3,7 +3,7 @@ import logging
 import discord
 from discord.ext import commands
 
-from modules.CurrencyBot import CurrencyBot
+from modules.KiwiBot import KiwiBot
 
 log = logging.getLogger(__name__)
 
@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 class Roles(commands.Cog):
     """A cog for listing and managing roles."""
 
-    def __init__(self, bot: CurrencyBot) -> None:
+    def __init__(self, bot: KiwiBot) -> None:
         self.bot = bot
 
     @commands.hybrid_command(
@@ -75,6 +75,6 @@ class Roles(commands.Cog):
         log.info("'listroles' command executed by %s.\n", ctx.author.display_name)
 
 
-async def setup(bot: CurrencyBot) -> None:
+async def setup(bot: KiwiBot) -> None:
     """Load the Roles cog."""
     await bot.add_cog(Roles(bot))

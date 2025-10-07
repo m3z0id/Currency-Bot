@@ -15,7 +15,7 @@ from modules.enums import StatName
 if TYPE_CHECKING:
     from discord import Interaction
 
-    from modules.CurrencyBot import CurrencyBot
+    from modules.KiwiBot import KiwiBot
 
 
 # --- Enums and Constants ---
@@ -59,7 +59,7 @@ class BlackjackView(discord.ui.View):
 
     def __init__(
         self,
-        bot: CurrencyBot,
+        bot: KiwiBot,
         user: discord.User | discord.Member,
         bet: int,
     ) -> None:
@@ -439,7 +439,7 @@ def format_hand(hand: list[Card], is_dealer_hidden: bool = False) -> str:
 
 
 class BlackjackCog(commands.Cog):
-    def __init__(self, bot: CurrencyBot) -> None:
+    def __init__(self, bot: KiwiBot) -> None:
         self.bot = bot
 
         # This factory creates a default stat dict for a new user
@@ -524,10 +524,8 @@ class BlackjackCog(commands.Cog):
             color=discord.Colour.gold(),
         )
         for i, (user_id, stats) in enumerate(sorted_players[:10]):
-            user = await ctx.guild.fetch_member(user_id)
-            user_display = user.display_name if user else f"User ID: {user_id}"
             embed.add_field(
-                name=f"{i + 1}. {user_display}",
+                name=f"{i + 1}. <@{user_id}>",
                 value=f"**Net Credits:** {stats['net_credits']:,}",
                 inline=False,
             )
@@ -535,5 +533,5 @@ class BlackjackCog(commands.Cog):
         await ctx.send(embed=embed, ephemeral=True)
 
 
-async def setup(bot: CurrencyBot) -> None:
+async def setup(bot: KiwiBot) -> None:
     await bot.add_cog(BlackjackCog(bot))

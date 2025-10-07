@@ -1,10 +1,10 @@
 import logging
-import os
 
 import discord
 from discord import Forbidden, HTTPException
 from discord.ext import commands, tasks
 
+from modules.KiwiBot import KiwiBot
 from modules.UserDB import UserDB
 
 # Use Python's logging module for better diagnostics in a reusable component
@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 class PrunerCog(commands.Cog):
     def __init__(
         self,
-        bot: commands.Bot,
+        bot: KiwiBot,
         user_db: UserDB,
         guild_id: int,
         role_ids_to_prune: list[int],
@@ -112,22 +112,23 @@ class PrunerCog(commands.Cog):
 
 
 # The setup function that discord.py calls when loading the extension
-async def setup(bot: commands.Bot) -> None:
-    GUILD_ID = int(os.getenv("GUILD_ID"))
-    ROLES_TO_PRUNE = [int(role_id.strip()) for role_id in os.getenv("ROLES_TO_PRUNE", "").split(",") if role_id.strip()]
-    INACTIVITY_DAYS = int(os.getenv("INACTIVITY_DAYS", "14"))
-
+async def setup(bot: KiwiBot) -> None:
     # The cog needs the UserDB instance from the bot
     user_db = getattr(bot, "user_db", None)
     if not user_db:
         msg = "Bot is missing the 'user_db' attribute."
         raise RuntimeError(msg)
 
+    if not bot.config.guild_id:
+        log.error("PrunerCog not loaded: GUILD_ID is not configured.")
+        return
+
+    # Use the configuration from the BotConfig object
     pruner_cog = PrunerCog(
         bot=bot,
         user_db=user_db,
-        guild_id=GUILD_ID,
-        role_ids_to_prune=ROLES_TO_PRUNE,
-        inactivity_days=INACTIVITY_DAYS,
+        guild_id=bot.config.guild_id,
+        role_ids_to_prune=bot.config.roles_to_prune,
+        inactivity_days=bot.config.inactivity_days,
     )
     await bot.add_cog(pruner_cog)

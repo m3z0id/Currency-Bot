@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 import string
 import time
 from typing import TYPE_CHECKING
@@ -15,33 +14,12 @@ from modules.enums import StatName
 from modules.leveling_utils import LevelBotProtocol, get_level, to_next_level
 
 if TYPE_CHECKING:
-    from modules.CurrencyBot import CurrencyBot
+    from modules.KiwiBot import KiwiBot
 
 log = logging.getLogger(__name__)
 
-# --- Configuration ---
-try:
-    LEVEL_UP_CHANNEL_ID = int(os.environ["LEVEL_UP_CHANNEL_ID"])
-except (KeyError, ValueError):
-    log.warning(
-        "'LEVEL_UP_CHANNEL_ID' is not set or is invalid. Level-up announcements will be disabled.",
-    )
-    LEVEL_UP_CHANNEL_ID = None
-# Add GUILD_ID for robust UDP handling
-try:
-    GUILD_ID = int(os.environ["GUILD_ID"])
-except (KeyError, ValueError):
-    log.warning("'GUILD_ID' is not set. UDP-based XP will not function correctly.")
-    GUILD_ID = None
-
 # UDP Server Configuration
-UDP_HOST = os.environ.get("UDP_HOST", "127.0.0.1")
-try:
-    # UDP_PORT is required for the server to run.
-    UDP_PORT = int(os.environ["UDP_PORT"])
-except (KeyError, ValueError):
-    log.info("UDP_PORT not set or invalid. UDP server for leveling will not be started.")
-    UDP_PORT = None
+UDP_HOST = "127.0.0.1"
 
 # --- Constants ---
 COOLDOWN_SECONDS = 5 * 60
@@ -54,7 +32,7 @@ class LeaderboardView(discord.ui.View):
 
     def __init__(
         self,
-        bot: "CurrencyBot",
+        bot: "KiwiBot",
         data: list[tuple[int, int]],
         per_page: int = 10,
     ) -> None:
@@ -113,23 +91,32 @@ class LevelingCog(commands.Cog):
     # Define the parent group for all leveling commands
     level = app_commands.Group(name="level", description="Commands for the leveling system.")
 
-    def __init__(self, bot: "CurrencyBot") -> None:
+    def __init__(
+        self,
+        bot: "KiwiBot",
+        level_up_channel_id: int | None,
+        guild_id: int | None,
+        udp_port: int | None,
+    ) -> None:
         self.bot = bot
         self.last_activity_timestamps: dict[int, float] = {}
         self.udp_transport: asyncio.DatagramTransport | None = None
+        self.level_up_channel_id = level_up_channel_id
+        self.guild_id = guild_id
+        self.udp_port = udp_port
 
     async def cog_load(self) -> None:
         """Start the UDP server when the cog is loaded."""
-        if not UDP_PORT:
+        if not self.udp_port:
             return  # Do not start if the port is not configured.
 
         loop = asyncio.get_running_loop()
         try:
             self.udp_transport, _ = await loop.create_datagram_endpoint(
                 lambda: LevelBotProtocol(self),
-                local_addr=(UDP_HOST, UDP_PORT),
+                local_addr=(UDP_HOST, self.udp_port),
             )
-            log.info("Leveling UDP server started on %s:%d.", UDP_HOST, UDP_PORT)
+            log.info("Leveling UDP server started on %s:%d.", UDP_HOST, self.udp_port)
         except OSError:
             log.exception("Failed to start leveling UDP server")
 
@@ -154,12 +141,12 @@ class LevelingCog(commands.Cog):
 
     async def _handle_level_up_announcement(self, user_id: int, new_level: int, new_xp: int, source: str) -> None:
         """Format and send a level-up announcement to the configured channel."""
-        if not LEVEL_UP_CHANNEL_ID:
+        if not self.level_up_channel_id:
             return
 
-        channel = self.bot.get_channel(LEVEL_UP_CHANNEL_ID)
+        channel = self.bot.get_channel(self.level_up_channel_id)
         if not isinstance(channel, discord.TextChannel):
-            log.warning("Level-up channel ID %s is invalid or not found.", LEVEL_UP_CHANNEL_ID)
+            log.warning("Level-up channel ID %s is invalid or not found.", self.level_up_channel_id)
             return
 
         user = self.bot.get_user(user_id)
@@ -212,11 +199,11 @@ class LevelingCog(commands.Cog):
 
     async def grant_udp_xp(self, user_id: int) -> None:
         """Handle UDP-based XP for GUILD_ID."""
-        if not GUILD_ID:
+        if not self.guild_id:
             log.warning("Cannot grant UDP XP: GUILD_ID environment variable is not set.")
             return
 
-        guild = self.bot.get_guild(GUILD_ID)
+        guild = self.bot.get_guild(self.guild_id)
         if not guild or not guild.get_member(user_id):
             # Don't grant XP if the user isn't in the specified server
             return
@@ -312,7 +299,7 @@ class LevelingCog(commands.Cog):
         await interaction.followup.send(embed=embed, view=view)
 
     @level.command(name="reset-xp", description="[Admin] Resets a user's XP.")
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def level_reset_xp(self, interaction: discord.Interaction, member: discord.Member) -> None:
         # This command is simple and can be defined locally.
         view = discord.ui.View(timeout=30)
@@ -354,6 +341,13 @@ class LevelingCog(commands.Cog):
         )
 
 
-async def setup(bot: "CurrencyBot") -> None:
+async def setup(bot: "KiwiBot") -> None:
     """Add the LevelingCog to the bot."""
-    await bot.add_cog(LevelingCog(bot))
+    await bot.add_cog(
+        LevelingCog(
+            bot,
+            level_up_channel_id=bot.config.level_up_channel_id,
+            guild_id=bot.config.guild_id,
+            udp_port=bot.config.udp_port,
+        ),
+    )

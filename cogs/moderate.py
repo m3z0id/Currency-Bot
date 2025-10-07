@@ -1,6 +1,5 @@
 import datetime
 import logging
-import os
 from typing import TYPE_CHECKING, Literal
 
 import discord
@@ -8,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 if TYPE_CHECKING:
-    from modules.CurrencyBot import CurrencyBot
+    from modules.KiwiBot import KiwiBot
 
 
 log = logging.getLogger(__name__)
@@ -21,14 +20,38 @@ TIME_UNITS = {
     "d": "days",
 }
 
-# Get the Muted Role ID from environment variables
-try:
-    # We try to convert it to an integer right away.
-    MUTED_ROLE_ID = int(os.getenv("MUTED_ROLE_ID"))
-except (ValueError, TypeError):
-    # If the variable is not set or is not a valid number, we set it to None.
-    MUTED_ROLE_ID = None
-    log.warning("MUTED_ROLE_ID is not set or invalid in environment variables. Mute/unmute commands will be disabled.")
+
+class DurationTransformer(app_commands.Transformer):
+    """A transformer to convert a string like '10m' or '1d' into a timedelta."""
+
+    async def transform(
+        self,
+        _interaction: discord.Interaction,
+        value: str,
+    ) -> datetime.timedelta:
+        """Do the conversion."""
+        value = value.lower().strip()
+        unit = value[-1]
+
+        if unit not in TIME_UNITS:
+            # Using CommandInvokeError to provide a clean error message to the user.
+            msg = "Invalid duration unit. Use 's', 'm', 'h', or 'd'."
+            raise app_commands.CommandInvokeError(msg)
+
+        try:
+            time_value = int(value[:-1])
+            delta = datetime.timedelta(**{TIME_UNITS[unit]: time_value})
+
+            # Add Discord's 28-day timeout limit check directly in the transformer
+            if delta > datetime.timedelta(days=28):
+                msg = "Duration cannot exceed 28 days."
+                raise app_commands.CommandInvokeError(msg)
+
+        except ValueError as e:
+            msg = "Invalid duration format. Example: `10m`, `2h`, `7d`"
+            raise app_commands.CommandInvokeError(msg) from e
+        else:
+            return delta
 
 
 class Moderate(commands.Cog):
@@ -37,8 +60,9 @@ class Moderate(commands.Cog):
     Provides slash commands for banning, kicking, muting, and timing out members.
     """
 
-    def __init__(self, bot: "CurrencyBot") -> None:
+    def __init__(self, bot: "KiwiBot", muted_role_id: int | None) -> None:
         self.bot = bot
+        self.muted_role_id = muted_role_id
 
     # Create a command group for all moderation actions
     moderate = app_commands.Group(
@@ -47,25 +71,6 @@ class Moderate(commands.Cog):
         default_permissions=discord.Permissions(mute_members=True),
         guild_only=True,
     )
-
-    # --- HELPER & CHECK FUNCTIONS ---
-
-    @staticmethod
-    def parse_duration(duration_str: str) -> datetime.timedelta | None:
-        """Parse a duration string (e.g., '10m', '1h', '3d') into a timedelta.
-
-        Returns None if the format is invalid.
-        """
-        duration_str = duration_str.lower().strip()
-        unit = duration_str[-1]
-        if unit not in TIME_UNITS:
-            return None
-
-        try:
-            value = int(duration_str[:-1])
-            return datetime.timedelta(**{TIME_UNITS[unit]: value})
-        except ValueError:
-            return None
 
     # REFACTOR: Centralized check to handle common moderation validations.
     async def _pre_action_checks(self, interaction: discord.Interaction, member: discord.Member) -> bool:
@@ -216,7 +221,7 @@ class Moderate(commands.Cog):
         self,
         interaction: discord.Interaction,
         member: discord.Member,
-        duration: str,
+        duration: app_commands.Transform[datetime.timedelta, DurationTransformer],
         reason: str | None = None,
         notify_member: bool = True,
     ) -> None:
@@ -224,19 +229,8 @@ class Moderate(commands.Cog):
         if not await self._pre_action_checks(interaction, member):
             return
 
-        delta = self.parse_duration(duration)
-        if delta is None:
-            await interaction.response.send_message(
-                "Invalid duration format. Use 's', 'm', 'h', or 'd'. Example: `10m`, `2h`, `7d`",
-                ephemeral=True,
-            )
-            return
-
-        if delta > datetime.timedelta(days=28):
-            await interaction.response.send_message("Timeout duration cannot exceed 28 days.", ephemeral=True)
-            return
-
-        end_timestamp = discord.utils.utcnow() + delta
+        # The 'duration' is now already a validated timedelta object!
+        end_timestamp = discord.utils.utcnow() + duration
 
         if notify_member:
             await self._notify_member(
@@ -244,20 +238,20 @@ class Moderate(commands.Cog):
                 member,
                 "timed out",
                 reason,
-                duration=f"until <t:{int(end_timestamp.timestamp())}:F>",
+                duration=f"until {discord.utils.format_dt(end_timestamp, 'F')}",
             )
 
         try:
-            await member.timeout(delta, reason=reason)
+            await member.timeout(duration, reason=reason)
             await interaction.response.send_message(
-                f"✅ **{member.display_name}** has been timed out until <t:{int(end_timestamp.timestamp())}:F>.",
+                f"✅ **{member.display_name}** has been timed out until {discord.utils.format_dt(end_timestamp, 'F')}.",
                 ephemeral=True,
             )
             log.info(
                 "%s timed out %s for %s. Reason: %s",
                 interaction.user,
                 member,
-                duration,
+                str(duration),
                 reason,
             )
         except discord.Forbidden:
@@ -324,14 +318,14 @@ class Moderate(commands.Cog):
         if not await self._pre_action_checks(interaction, member):
             return
 
-        if not MUTED_ROLE_ID:
+        if not self.muted_role_id:
             await interaction.response.send_message(
                 "The Muted Role ID has not been configured by the bot owner.",
                 ephemeral=True,
             )
             return
 
-        muted_role = await interaction.guild.fetch_role(MUTED_ROLE_ID)
+        muted_role = await interaction.guild.fetch_role(self.muted_role_id)
         if not muted_role:
             await interaction.response.send_message(
                 "The configured muted role could not be found on this server. It may have been deleted.",
@@ -373,14 +367,14 @@ class Moderate(commands.Cog):
         if not await self._pre_action_checks(interaction, member):
             return
 
-        if not MUTED_ROLE_ID:
+        if not self.muted_role_id:
             await interaction.response.send_message(
                 "The Muted Role ID has not been configured by the bot owner.",
                 ephemeral=True,
             )
             return
 
-        muted_role = await interaction.guild.fetch_role(MUTED_ROLE_ID)
+        muted_role = await interaction.guild.fetch_role(self.muted_role_id)
         if not muted_role:
             await interaction.response.send_message(
                 "The configured muted role could not be found on this server. It may have been deleted.",
@@ -409,6 +403,6 @@ class Moderate(commands.Cog):
             log.exception("Failed to unmute %s", member)
 
 
-async def setup(bot: "CurrencyBot") -> None:
+async def setup(bot: "KiwiBot") -> None:
     """Add the cog to the bot."""
-    await bot.add_cog(Moderate(bot))
+    await bot.add_cog(Moderate(bot, muted_role_id=bot.config.muted_role_id))

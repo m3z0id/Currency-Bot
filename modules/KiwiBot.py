@@ -1,6 +1,6 @@
 import logging
 import pathlib
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import discord
 from discord import Forbidden, HTTPException, MissingApplicationID
@@ -8,6 +8,7 @@ from discord.app_commands import CommandSyncFailure, TranslationError
 from discord.ext import commands
 from discord.ext.commands import ExtensionAlreadyLoaded, ExtensionFailed, ExtensionNotFound, NoEntryPointError
 
+from modules.config import BotConfig
 from modules.Database import Database
 from modules.InvitesDB import InvitesDB
 from modules.StatsDB import StatsDB
@@ -17,16 +18,22 @@ from modules.UserDB import UserDB
 log = logging.getLogger(__name__)
 
 
-class CurrencyBot(commands.Bot):
+class KiwiBot(commands.Bot):
     loaded_extensions: ClassVar[list[str]] = []
 
-    def __init__(self) -> None:
+    def __init__(self, config: BotConfig) -> None:
+        self.config = config
         # Define the bot and its command prefix
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
         intents.presences = True
-        super().__init__(command_prefix="!", intents=intents, help_command=None)
+        intents.reactions = True
+        super().__init__(
+            command_prefix=commands.when_mentioned_or("!"),
+            intents=intents,
+            help_command=None,
+        )
 
     # Event to notify when the bot has connected
     async def setup_hook(self) -> None:
@@ -70,7 +77,12 @@ class CurrencyBot(commands.Bot):
 
         log.info("Setup complete.")
 
-    async def on_error(self, event_method: str, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+    async def on_error(
+        self,
+        event_method: str,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
         """Log unhandled exceptions."""
         log.exception(
             "Unhandled exception in %s",
@@ -78,7 +90,11 @@ class CurrencyBot(commands.Bot):
             extra={"*args": args, "**kwargs": kwargs},
         )
 
-    async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
+    async def on_command_error(
+        self,
+        ctx: commands.Context,
+        error: commands.CommandError,
+    ) -> None:
         """Log unhandled command exceptions."""
         try:
             raise error  # noqa: TRY301

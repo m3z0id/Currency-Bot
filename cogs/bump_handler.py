@@ -1,7 +1,6 @@
 import asyncio
 import datetime
 import logging
-import os
 import random
 from typing import TYPE_CHECKING
 
@@ -12,7 +11,7 @@ from modules.discord_utils import ping_online_role
 from modules.enums import StatName
 
 if TYPE_CHECKING:
-    from modules.CurrencyBot import CurrencyBot
+    from modules.KiwiBot import KiwiBot
     from modules.UserDB import UserDB
 
 log = logging.getLogger(__name__)
@@ -25,16 +24,22 @@ BACKUP_REMINDER_DELAY = datetime.timedelta(minutes=10)
 class BumpHandlerCog(commands.Cog):
     """Handle rewards and reminders for server bumps from bots like Disboard."""
 
-    def __init__(self, bot: "CurrencyBot") -> None:
+    def __init__(
+        self,
+        bot: "KiwiBot",
+        disboard_bot_id: int,
+        guild_id: int,
+        bumper_role_id: int,
+        backup_bumper_role_id: int | None,
+    ) -> None:
         self.bot = bot
         self.user_db: UserDB = bot.user_db
         self.reminder_task: asyncio.Task | None = None
 
-        self.disboard_bot_id = int(os.getenv("DISBOARD_BOT_ID"))
-        self.guild_id = int(os.getenv("GUILD_ID"))
-        self.bumper_role_id = int(os.getenv("BUMPER_ROLE_ID"))
-        backup_bumper_role_id_str = os.getenv("BACKUP_BUMPER_ROLE_ID")
-        self.backup_bumper_role_id: int | None = int(backup_bumper_role_id_str) if backup_bumper_role_id_str else None
+        self.disboard_bot_id = disboard_bot_id
+        self.guild_id = guild_id
+        self.bumper_role_id = bumper_role_id
+        self.backup_bumper_role_id = backup_bumper_role_id
 
     async def cog_load(self) -> None:
         """On cog load, find the last bump and process it to schedule a reminder."""
@@ -77,14 +82,13 @@ class BumpHandlerCog(commands.Cog):
 
         try:
             if is_new_bump:
-                reward = random.randint(50, 100)
+                reward = random.randint(50, 80)
                 # Reward Currency
                 await self.bot.stats_db.increment_stat(bumper.id, StatName.CURRENCY, reward)
                 new_bump_count = await self.bot.stats_db.increment_stat(bumper.id, StatName.BUMPS, 1)
                 log.info("Rewarded %s with $%d for bumping.", bumper.display_name, reward)
                 await channel.send(
-                    f"🎉 Thanks for bumping, {bumper.mention}! \
-                    This is your **{new_bump_count:,}th** bump. You've received **${reward}**.",
+                    f"🎉 Thanks for your **{new_bump_count:,}th** bump, {bumper.mention}! You've received **${reward}**.",
                 )
 
             # --- Unified Reminder Scheduling ---
@@ -113,7 +117,7 @@ class BumpHandlerCog(commands.Cog):
 
         if delay_seconds <= 0:
             log.info("Reminder delay is zero or negative, sending now.")
-            await self._send_reminder_message(channel, last_bumper)
+            await self._send_reminder_message(channel, last_bumper, self.bumper_role_id)
             return
 
         log.info("Scheduling bump reminder in %.2f seconds.", delay_seconds)
@@ -206,9 +210,18 @@ class BumpHandlerCog(commands.Cog):
         )
 
 
-async def setup(bot: "CurrencyBot") -> None:
+async def setup(bot: "KiwiBot") -> None:
     """Load the cog."""
-    if not os.getenv("DISBOARD_BOT_ID"):
-        log.error("BumpHandlerCog not loaded: DISBOARD_BOT_ID is not configured.")
+    if not all([bot.config.disboard_bot_id, bot.config.guild_id, bot.config.bumper_role_id]):
+        log.error("BumpHandlerCog not loaded: One or more required IDs are not configured.")
         return
-    await bot.add_cog(BumpHandlerCog(bot))
+
+    await bot.add_cog(
+        BumpHandlerCog(
+            bot,
+            disboard_bot_id=bot.config.disboard_bot_id,
+            guild_id=bot.config.guild_id,
+            bumper_role_id=bot.config.bumper_role_id,
+            backup_bumper_role_id=bot.config.backup_bumper_role_id,
+        ),
+    )

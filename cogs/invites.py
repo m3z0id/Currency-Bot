@@ -1,26 +1,14 @@
 # In cogs/invites.py
 import logging
-import os
 from datetime import datetime
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from modules.CurrencyBot import CurrencyBot
+from modules.KiwiBot import KiwiBot
 
 log = logging.getLogger(__name__)
-
-# --- Environment Configuration ---
-try:
-    GUILD_ID = int(os.environ["GUILD_ID"])
-    ALERT_CHANNEL_ID = int(os.environ["JOIN_LEAVE_LOG_CHANNEL_ID"])
-except (KeyError, ValueError):
-    log.exception(
-        "Missing or invalid GUILD_ID or ALERT_CHANNEL_ID environment variable",
-    )
-    GUILD_ID = None
-    ALERT_CHANNEL_ID = None
 
 
 class InvitesCog(commands.Cog):
@@ -29,20 +17,22 @@ class InvitesCog(commands.Cog):
     # 1. Define the parent group for all invite commands
     invites = app_commands.Group(name="invites", description="Commands for invite tracking.")
 
-    def __init__(self, bot: CurrencyBot) -> None:
+    def __init__(self, bot: KiwiBot, guild_id: int, alert_channel_id: int) -> None:
         self.bot = bot
         self.invites: dict[str, int] = {}
-        if not all([GUILD_ID, ALERT_CHANNEL_ID]):
-            log.warning("InvitesCog will not function without GUILD_ID and ALERT_CHANNEL_ID.")
-        else:
-            self.bot.loop.create_task(self.cache_invites())
+        self.guild_id = guild_id
+        self.alert_channel_id = alert_channel_id
+        self.bot.loop.create_task(self.cache_invites())
 
     async def cache_invites(self) -> None:
         """Cache the guild's invites on startup."""
         await self.bot.wait_until_ready()
-        guild = self.bot.get_guild(GUILD_ID)
+        if not self.guild_id:
+            return
+
+        guild = self.bot.get_guild(self.guild_id)
         if not guild:
-            log.error("Could not find guild with ID %s for invite caching.", GUILD_ID)
+            log.error("Could not find guild with ID %s for invite caching.", self.guild_id)
             return
 
         try:
@@ -67,12 +57,12 @@ class InvitesCog(commands.Cog):
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
         """Handle new members joining the server and finds the inviter by diffing invite uses."""
-        if member.guild.id != GUILD_ID or member.bot:
+        if member.guild.id != self.guild_id or member.bot:
             return
 
-        alert_channel = self.bot.get_channel(ALERT_CHANNEL_ID)
+        alert_channel = self.bot.get_channel(self.alert_channel_id)
         if not alert_channel or not isinstance(alert_channel, discord.TextChannel):
-            log.warning("Could not find alert channel %s for invite tracking.", ALERT_CHANNEL_ID)
+            log.warning("Could not find alert channel %s for invite tracking.", self.alert_channel_id)
             return
 
         inviter = None
@@ -117,24 +107,39 @@ class InvitesCog(commands.Cog):
             timestamp=member.joined_at,
         )
         embed.set_author(name=f"{member.name} ({member.id})", icon_url=member.display_avatar)
-        embed.set_footer(text=f"Invite code: {found_invite.code} ({found_invite.uses} uses)")
+
+        if found_invite:
+            inviter = found_invite.inviter
+            uses = found_invite.uses or "N/A"
+            embed.add_field(
+                name="Invited by",
+                value=(f"{inviter.mention} ({inviter.name})" if inviter else "Unknown Inviter"),
+            )
+            embed.set_footer(text=f"Invite code: {found_invite.code} ({uses} uses)")
+        else:
+            embed.add_field(name="Invite", value="Could not determine the invite used.")
+            embed.set_footer(text="Joined via vanity URL, expired invite, or other means.")
+
         await alert_channel.send(embed=embed)
 
     @commands.Cog.listener()
     async def on_invite_create(self, invite: discord.Invite) -> None:
         """Handle new invite creation to keep the cache updated."""
-        if invite.guild and invite.guild.id == GUILD_ID:
+        if invite.guild and invite.guild.id == self.guild_id:
             self.invites[invite.code] = invite.uses
             log.info("Cached new invite '%s' for guild '%s'.", invite.code, invite.guild.name)
 
     @commands.Cog.listener()
     async def on_invite_delete(self, invite: discord.Invite) -> None:
         """Handle invite deletion to keep the cache updated."""
-        if invite.guild and invite.guild.id == GUILD_ID and invite.code in self.invites:
+        if invite.guild and invite.guild.id == self.guild_id and invite.code in self.invites:
             del self.invites[invite.code]
-            log.info("Removed deleted invite '%s' from cache for guild '%s'.", invite.code, invite.guild.name)
+            log.info(
+                "Removed deleted invite '%s' from cache for guild '%s'.",
+                invite.code,
+                invite.guild.name,
+            )
 
-    # 2. Convert commands to subcommands of the 'invites' group
     @invites.command(name="top", description="Shows the invite leaderboard.")
     async def invites_top(self, interaction: discord.Interaction) -> None:
         """Display the top 10 inviters in an embed."""
@@ -177,7 +182,7 @@ class InvitesCog(commands.Cog):
         await interaction.followup.send(embed=embed)
 
     @invites.command(name="import", description="[Owner] Bulk import invites from the API.")
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def invites_import(self, interaction: discord.Interaction) -> None:
         """Fetch all guild members and imports new invitee-inviter relationships."""
         await interaction.response.defer(ephemeral=True)
@@ -186,9 +191,9 @@ class InvitesCog(commands.Cog):
         try:
             existing_invitees = await self.bot.invites_db.get_all_invitee_ids(interaction.guild.id)
             all_members = await self.bot.invites_db.get_all_guild_members_api(interaction.guild.id)
-        except Exception as e:
+        except Exception:
             log.exception("Error during bulk import preparation.")
-            await interaction.followup.send(f"An error occurred during preparation: {e}")
+            await interaction.followup.send("An error occurred during preparation")
             return
 
         if not all_members:
@@ -221,9 +226,15 @@ class InvitesCog(commands.Cog):
         await interaction.followup.send(f"Import complete. Added {new_imports} new invite records.")
 
 
-async def setup(bot: CurrencyBot) -> None:
+async def setup(bot: KiwiBot) -> None:
     """Entry point for loading the cog."""
-    if not all([GUILD_ID, ALERT_CHANNEL_ID]):
+    if not all([bot.config.guild_id, bot.config.join_leave_log_channel_id]):
         log.error("InvitesCog not loaded due to missing environment variables.")
         return
-    await bot.add_cog(InvitesCog(bot))
+    await bot.add_cog(
+        InvitesCog(
+            bot,
+            guild_id=bot.config.guild_id,
+            alert_channel_id=bot.config.join_leave_log_channel_id,
+        ),
+    )

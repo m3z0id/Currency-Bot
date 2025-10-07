@@ -20,7 +20,7 @@ from modules.enums import StatName
 
 if TYPE_CHECKING:
     # This avoids circular imports while providing type hints for the bot class
-    from modules.CurrencyBot import CurrencyBot
+    from modules.KiwiBot import KiwiBot
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class DailyView(discord.ui.View):
 
     def __init__(
         self,
-        bot: "CurrencyBot",
+        bot: "KiwiBot",
         owner_id: int,
         daily_mon: int,
         new_balance: int,
@@ -154,7 +154,7 @@ class DailyView(discord.ui.View):
 
 
 class Daily(commands.Cog):
-    def __init__(self, bot: "CurrencyBot") -> None:
+    def __init__(self, bot: "KiwiBot") -> None:
         self.bot = bot
         self.daily_management_task.start()
 
@@ -286,6 +286,6 @@ class Daily(commands.Cog):
         await ctx.send(response_content, view=view, ephemeral=True)
 
 
-async def setup(bot: "CurrencyBot") -> None:
+async def setup(bot: "KiwiBot") -> None:
     """Add the Daily cog to the bot."""
     await bot.add_cog(Daily(bot))

@@ -4,14 +4,14 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from modules.CurrencyBot import CurrencyBot
 from modules.enums import StatName
+from modules.KiwiBot import KiwiBot
 
 log = logging.getLogger(__name__)
 
 
 class Donate(commands.Cog):
-    def __init__(self, bot: CurrencyBot) -> None:
+    def __init__(self, bot: KiwiBot) -> None:
         self.bot = bot
 
     @commands.hybrid_command(
@@ -53,5 +53,5 @@ class Donate(commands.Cog):
         log.info("Donate command executed by %s.\n", ctx.author.display_name)
 
 
-async def setup(bot: CurrencyBot) -> None:
+async def setup(bot: KiwiBot) -> None:
     await bot.add_cog(Donate(bot))

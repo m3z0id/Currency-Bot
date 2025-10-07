@@ -1,9 +1,9 @@
 import logging
-import os
 
 from dotenv import load_dotenv
 
-from modules.CurrencyBot import CurrencyBot
+from modules.config import BotConfig
+from modules.KiwiBot import KiwiBot
 
 # Loads environment variables
 load_dotenv()
@@ -18,6 +18,16 @@ logging.basicConfig(
     ],
 )
 
-# Run the bot with your token
-bot: CurrencyBot = CurrencyBot()
-bot.run(os.getenv("TOKEN"))
+try:
+    # Create the config from environment first
+    config = BotConfig.from_environment()
+
+    # Pass the config object into the bot's constructor
+    bot: KiwiBot = KiwiBot(config=config)
+    bot.run(config.token)
+
+except (KeyError, ValueError):
+    log = logging.getLogger(__name__)
+    log.exception(
+        "A critical configuration error occurred. Please check your environment variables.",
+    )

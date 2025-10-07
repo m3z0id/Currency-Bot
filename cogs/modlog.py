@@ -1,14 +1,13 @@
 import asyncio
 import datetime
 import logging
-import os
-from typing import TYPE_CHECKING
+import typing
 
 import discord
 from discord.ext import commands
 
-if TYPE_CHECKING:
-    from modules.CurrencyBot import CurrencyBot
+if typing.TYPE_CHECKING:
+    from modules.KiwiBot import KiwiBot
 
 log = logging.getLogger(__name__)
 
@@ -16,7 +15,7 @@ log = logging.getLogger(__name__)
 class ModLogCog(commands.Cog):
     """A cog for logging moderation actions to a specified channel."""
 
-    def __init__(self, bot: "CurrencyBot", mod_channel_id: int, muted_role_id: int | None) -> None:
+    def __init__(self, bot: "KiwiBot", mod_channel_id: int, muted_role_id: int | None) -> None:
         self.bot = bot
         self.mod_channel_id = mod_channel_id
         self.muted_role_id = muted_role_id
@@ -165,8 +164,8 @@ class ModLogCog(commands.Cog):
                     after,
                     discord.AuditLogAction.member_update,
                 )
-                timestamp = int(after.timed_out_until.timestamp())
-                duration_str = f"<t:{timestamp}:F> (<t:{timestamp}:R>)"
+                duration_str = f"{discord.utils.format_dt(after.timed_out_until, 'F')} \
+({discord.utils.format_dt(after.timed_out_until, 'R')})"
 
                 await self._log_action(
                     title="Member Timed Out",
@@ -229,26 +228,16 @@ class ModLogCog(commands.Cog):
                 )
 
 
-async def setup(bot: "CurrencyBot") -> None:
+async def setup(bot: "KiwiBot") -> None:
     """Add the cog to the bot."""
-    mod_channel_id_str = os.getenv("MOD_CHANNEL_ID")
-    if not mod_channel_id_str:
-        log.warning("MOD_CHANNEL_ID environment variable not set. ModLog cog will not be loaded.")
+    if not bot.config.mod_channel_id:
+        log.warning("MOD_CHANNEL_ID is not configured. ModLog cog will not be loaded.")
         return
 
-    # Handle the optional Muted Role ID
-    muted_role_id_str = os.getenv("MUTED_ROLE_ID")
-    muted_role_id = None
-    if muted_role_id_str:
-        try:
-            muted_role_id = int(muted_role_id_str)
-        except ValueError:
-            log.warning("MUTED_ROLE_ID is not a valid integer. Mute tracking will be disabled.")
-    else:
-        log.info("MUTED_ROLE_ID not set. Mute role tracking will be disabled.")
-
-    try:
-        mod_channel_id = int(mod_channel_id_str)
-        await bot.add_cog(ModLogCog(bot, mod_channel_id, muted_role_id))
-    except ValueError:
-        log.exception("MOD_CHANNEL_ID is not a valid integer. ModLog cog will not be loaded.")
+    await bot.add_cog(
+        ModLogCog(
+            bot,
+            mod_channel_id=bot.config.mod_channel_id,
+            muted_role_id=bot.config.muted_role_id,
+        ),
+    )

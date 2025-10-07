@@ -6,8 +6,8 @@ from typing import ClassVar
 from discord import app_commands
 from discord.ext import commands
 
-from modules.CurrencyBot import CurrencyBot
 from modules.enums import StatName
+from modules.KiwiBot import KiwiBot
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class Sell(commands.Cog):
         "Bone Marrow",
     )
 
-    def __init__(self, bot: CurrencyBot) -> None:
+    def __init__(self, bot: KiwiBot) -> None:
         self.bot = bot
 
     async def _process_sale(
@@ -96,5 +96,5 @@ class Sell(commands.Cog):
         await self._process_sale(ctx, organ, self.ORGANS, "harvest")
 
 
-async def setup(bot: CurrencyBot) -> None:
+async def setup(bot: KiwiBot) -> None:
     await bot.add_cog(Sell(bot))
