@@ -195,7 +195,7 @@ class UserDB:
                         WHEN daily_reminder_preference = 'ONCE' THEN 'NEVER'
                         ELSE daily_reminder_preference END
                 WHERE guild_id = ?
-                """,
+                """,  # noqa: S608
                 (guild_id,),
             )
             await conn.commit()
