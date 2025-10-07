@@ -95,17 +95,6 @@ class Sell(commands.Cog):
     async def harvest(self, ctx: commands.Context, organ: str | None = None) -> None:
         await self._process_sale(ctx, organ, self.ORGANS, "harvest")
 
-    @sell.error
-    @harvest.error
-    async def sell_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
-        if isinstance(error, commands.CommandOnCooldown):
-            time_left = error.retry_after
-            minutes = int(time_left // 60)
-            seconds = int(time_left % 60)
-            await ctx.send(
-                f"Please wait {minutes}m {seconds}s before repeating this command.",
-            )
-
 
 async def setup(bot: CurrencyBot) -> None:
     await bot.add_cog(Sell(bot))

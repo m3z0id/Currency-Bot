@@ -80,9 +80,12 @@ class BumpHandlerCog(commands.Cog):
                 reward = random.randint(50, 100)
                 # Reward Currency
                 await self.bot.stats_db.increment_stat(bumper.id, StatName.CURRENCY, reward)
-                await self.bot.stats_db.increment_stat(bumper.id, StatName.BUMPS, 1)
+                new_bump_count = await self.bot.stats_db.increment_stat(bumper.id, StatName.BUMPS, 1)
                 log.info("Rewarded %s with $%d for bumping.", bumper.display_name, reward)
-                await channel.send(f"🎉 Thanks for bumping, {bumper.mention}! You've received **${reward}**.")
+                await channel.send(
+                    f"🎉 Thanks for bumping, {bumper.mention}! \
+                    This is your **{new_bump_count:,}th** bump. You've received **${reward}**.",
+                )
 
             # --- Unified Reminder Scheduling ---
             if is_new_bump:
@@ -147,7 +150,11 @@ class BumpHandlerCog(commands.Cog):
         is_backup: bool = False,
     ) -> None:
         """Construct and send the bump reminder message."""
-        log.info("Sending %s bump reminder to #%s.", "backup" if is_backup else "primary", channel.name)
+        log.info(
+            "Sending %s bump reminder to #%s.",
+            "backup" if is_backup else "primary",
+            channel.name,
+        )
         try:
             if is_backup:
                 title = "⚠️ Still Need a Bump! ⚠️"
@@ -165,7 +172,11 @@ class BumpHandlerCog(commands.Cog):
 
             await channel.send(content=ping_text, embed=reminder_embed)
         except (discord.HTTPException, discord.Forbidden):
-            log.exception("Failed to send %s reminder to %s.", "backup" if is_backup else "primary", channel.name)
+            log.exception(
+                "Failed to send %s reminder to %s.",
+                "backup" if is_backup else "primary",
+                channel.name,
+            )
 
     async def _find_last_bump_message(self, guild: discord.Guild) -> discord.Message | None:
         """Scan channels to find the last successful bump message."""

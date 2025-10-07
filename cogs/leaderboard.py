@@ -16,6 +16,7 @@ class Leaderboard(commands.Cog):
         stat=[
             app_commands.Choice(name="💰 Currency", value=StatName.CURRENCY.value),
             app_commands.Choice(name="⬆️ Bumps", value=StatName.BUMPS.value),
+            app_commands.Choice(name="⭐ XP", value=StatName.XP.value),
         ],
     )
     async def leaderboard(self, interaction: discord.Interaction, stat: app_commands.Choice[str]) -> None:

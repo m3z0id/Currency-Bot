@@ -17,9 +17,10 @@ class UserDB:
                 f"""
                 CREATE TABLE IF NOT EXISTS {self.USERS_TABLE} (
                     discord_id INTEGER PRIMARY KEY NOT NULL,
-                    last_active_timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+                    last_active_timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
                     daily_reminder_preference TEXT NOT NULL DEFAULT 'NEVER',
-                    has_claimed_daily INTEGER NOT NULL DEFAULT 0
+                    has_claimed_daily INTEGER NOT NULL DEFAULT 0,
+                    leveling_opt_out INTEGER NOT NULL DEFAULT 0
                 )
                 """,
             )
@@ -33,7 +34,7 @@ class UserDB:
                 INSERT INTO {self.USERS_TABLE} (discord_id)
                 VALUES (?)
                 ON CONFLICT(discord_id) DO UPDATE SET
-                last_active_timestamp = strftime('%Y-%m-%d %H:%M:%f', 'now')
+                last_active_timestamp = strftime('%Y-%m-%d %H:%M:%S', 'now')
                 """,  # noqa: S608
                 (discord_id,),
             )
@@ -62,6 +63,35 @@ class UserDB:
                 (discord_id, preference),
             )
             await conn.commit()
+
+    async def set_leveling_opt_out(self, discord_id: int, is_opted_out: bool) -> None:
+        """Set the leveling opt-out preference for a user."""
+        async with self.database.get_conn() as conn:
+            await conn.execute(
+                f"""
+                INSERT INTO {self.USERS_TABLE} (discord_id, leveling_opt_out) VALUES (?, ?)
+                ON CONFLICT(discord_id) DO UPDATE SET leveling_opt_out = excluded.leveling_opt_out
+                """,  # noqa: S608
+                (discord_id, 1 if is_opted_out else 0),
+            )
+            await conn.commit()
+
+    async def is_user_opted_out(self, discord_id: int) -> bool:
+        """Check if a user has opted out of the leveling system."""
+        async with self.database.get_cursor() as cursor:
+            await cursor.execute(
+                f"""
+                SELECT leveling_opt_out FROM {self.USERS_TABLE}
+                WHERE discord_id = ?
+                """,  # noqa: S608
+                (discord_id,),
+            )
+            result = await cursor.fetchone()
+        if result:
+            # result[0] will be 1 if opted out, 0 otherwise
+            return result[0] == 1
+        # Default to not opted out if the user isn't in the table yet
+        return False
 
     async def get_active_users(self, days: int) -> list[int]:
         """Get a list of user IDs that have been active within a specified number of days."""
@@ -99,7 +129,7 @@ class UserDB:
                 f"""
                 INSERT INTO {self.USERS_TABLE} (discord_id) VALUES (?)
                 ON CONFLICT(discord_id) DO UPDATE SET
-                    last_active_timestamp = strftime('%Y-%m-%d %H:%M:%f', 'now')
+                    last_active_timestamp = strftime('%Y-%m-%d %H:%M:%S', 'now')
                 """,  # noqa: S608
                 [(user_id,) for user_id in user_ids],
             )

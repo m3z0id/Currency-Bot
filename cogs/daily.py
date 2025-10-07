@@ -254,8 +254,7 @@ class Daily(commands.Cog):
             random.randint(101, 2000) if random.random() < 0.01 else random.randint(50, 100)  # noqa: PLR2004
         )
 
-        await self.bot.stats_db.increment_stat(ctx.author.id, StatName.CURRENCY, daily_mon)
-        new_balance = await self.bot.stats_db.get_stat(ctx.author.id, StatName.CURRENCY)
+        new_balance = await self.bot.stats_db.increment_stat(ctx.author.id, StatName.CURRENCY, daily_mon)
 
         log.info(
             "User %s claimed $%s, new balance is $%s",

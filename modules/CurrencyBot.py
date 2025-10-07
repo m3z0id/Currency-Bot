@@ -6,14 +6,10 @@ import discord
 from discord import Forbidden, HTTPException, MissingApplicationID
 from discord.app_commands import CommandSyncFailure, TranslationError
 from discord.ext import commands
-from discord.ext.commands import (
-    ExtensionAlreadyLoaded,
-    ExtensionFailed,
-    ExtensionNotFound,
-    NoEntryPointError,
-)
+from discord.ext.commands import ExtensionAlreadyLoaded, ExtensionFailed, ExtensionNotFound, NoEntryPointError
 
 from modules.Database import Database
+from modules.InvitesDB import InvitesDB
 from modules.StatsDB import StatsDB
 from modules.TaskDB import TaskDB
 from modules.UserDB import UserDB
@@ -41,11 +37,13 @@ class CurrencyBot(commands.Bot):
         self.stats_db = StatsDB(self.database)
         self.user_db = UserDB(self.database)
         self.task_db = TaskDB(self.database)
+        self.invites_db = InvitesDB(self.database)
 
         # AWAIT the post-initialization tasks to ensure tables are created
         await self.stats_db.post_init()
         await self.user_db.post_init()
         await self.task_db.post_init()
+        await self.invites_db.post_init()
         log.info("All database tables initialized.")
 
         # Now it's safe to load cogs
