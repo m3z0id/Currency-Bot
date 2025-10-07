@@ -10,13 +10,14 @@ import logging
 import random
 import time
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 from zoneinfo import ZoneInfo
 
 import discord
 from discord.ext import commands, tasks
 
 from modules.enums import StatName
+from modules.types import GuildId, ReminderPreference, UserId
 
 if TYPE_CHECKING:
     # This avoids circular imports while providing type hints for the bot class
@@ -37,7 +38,7 @@ class DailyView(discord.ui.View):
     def __init__(
         self,
         bot: "KiwiBot",
-        owner_id: int,
+        owner_id: UserId,
         daily_mon: int,
         new_balance: int,
         author: discord.User,
@@ -73,7 +74,7 @@ class DailyView(discord.ui.View):
     async def _update_reminder_preference(
         self,
         interaction: discord.Interaction,
-        preference: str,
+        preference: ReminderPreference,
     ) -> None:
         """Handle the logic for all reminder button clicks."""
         messages = {
@@ -81,7 +82,8 @@ class DailyView(discord.ui.View):
             "ALWAYS": "Success! Your reminder preference is now set to 'Always'.",
             "NEVER": "Success! Reminders have been disabled.",
         }
-        await self.bot.user_db.set_daily_reminder_preference(self.owner_id, preference)
+        if interaction.guild:
+            await self.bot.user_db.set_daily_reminder_preference(self.owner_id, preference, GuildId(interaction.guild.id))
         await interaction.response.edit_message(view=self)
         await interaction.followup.send(messages[preference], ephemeral=True)
 
@@ -158,6 +160,7 @@ class Daily(commands.Cog):
         self.bot = bot
         self.daily_management_task.start()
 
+    @override
     def cog_unload(self) -> None:
         """Clean up when the cog is unloaded."""
         self.daily_management_task.cancel()
@@ -166,15 +169,22 @@ class Daily(commands.Cog):
     async def daily_management_task(self) -> None:
         """Handle daily resets and reminders using pure bulk operations."""
         log.info("Starting daily management task...")
-        try:
-            # Atomically reset all daily claims and fetch users needing a reminder.
-            all_users_to_remind = await self.bot.user_db.process_daily_reset()
-            if not all_users_to_remind:
-                log.info("No users to remind for their daily claim.")
-                return
+        all_reminders_to_send = []
 
-            log.info("Preparing to send %d daily reminders.", len(all_users_to_remind))
-            await self.send_reminders(all_users_to_remind)
+        # Iterate over each guild to process resets independently.
+        for guild in self.bot.guilds:
+            try:
+                # Atomically reset daily claims for the guild and fetch users needing a reminder.
+                users_to_remind_in_guild = await self.bot.user_db.process_daily_reset(GuildId(guild.id))
+                if users_to_remind_in_guild:
+                    all_reminders_to_send.extend(users_to_remind_in_guild)
+            except Exception:
+                log.exception("Failed to process daily reset for guild %d", guild.id)
+
+        try:
+            if all_reminders_to_send:
+                log.info("Preparing to send %d daily reminders.", len(all_reminders_to_send))
+                await self.send_reminders(set(all_reminders_to_send))
 
         except Exception:
             log.exception("An error occurred during the daily management task.")
@@ -208,7 +218,7 @@ class Daily(commands.Cog):
         else:
             log.info("Daily task loop has no missed run.")
 
-    async def send_reminders(self, user_ids: Iterable[int]) -> None:
+    async def send_reminders(self, user_ids: Iterable[UserId]) -> None:
         """Send reminders to a list of users sequentially to avoid rate limits."""
         reminder_message = "⏰ Your daily reward is ready to claim! Use `/daily` to get your reward."
         success_count = 0
@@ -239,8 +249,12 @@ class Daily(commands.Cog):
 
     @commands.hybrid_command(name="daily", description="Claim your daily currency.")
     async def daily(self, ctx: commands.Context) -> None:
+        if not ctx.guild:
+            await ctx.send("This command can only be used in a server.", ephemeral=True)
+            return
+
         # Atomically attempt to claim the daily. If it fails, they've already claimed.
-        if not await self.bot.user_db.attempt_daily_claim(ctx.author.id):
+        if not await self.bot.user_db.attempt_daily_claim(UserId(ctx.author.id), GuildId(ctx.guild.id)):
             embed = discord.Embed(
                 title="Already Claimed",
                 description="You have already claimed your daily reward! Wait for the next reset at midnight Auckland time.",
@@ -254,7 +268,12 @@ class Daily(commands.Cog):
             random.randint(101, 2000) if random.random() < 0.01 else random.randint(50, 100)  # noqa: PLR2004
         )
 
-        new_balance = await self.bot.stats_db.increment_stat(ctx.author.id, StatName.CURRENCY, daily_mon)
+        new_balance = await self.bot.stats_db.increment_stat(
+            UserId(ctx.author.id),
+            GuildId(ctx.guild.id),
+            StatName.CURRENCY,
+            daily_mon,
+        )
 
         log.info(
             "User %s claimed $%s, new balance is $%s",
@@ -276,7 +295,7 @@ class Daily(commands.Cog):
 
         view = DailyView(
             bot=self.bot,
-            owner_id=ctx.author.id,
+            owner_id=UserId(ctx.author.id),
             daily_mon=daily_mon,
             new_balance=new_balance,
             author=ctx.author,

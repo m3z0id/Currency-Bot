@@ -9,6 +9,7 @@ from discord.ext import commands
 
 from modules.discord_utils import ping_online_role
 from modules.enums import StatName
+from modules.types import GuildId, RoleId, UserId
 
 if TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
@@ -27,10 +28,10 @@ class BumpHandlerCog(commands.Cog):
     def __init__(
         self,
         bot: "KiwiBot",
-        disboard_bot_id: int,
-        guild_id: int,
-        bumper_role_id: int,
-        backup_bumper_role_id: int | None,
+        disboard_bot_id: UserId,
+        guild_id: GuildId,
+        bumper_role_id: RoleId,
+        backup_bumper_role_id: RoleId | None,
     ) -> None:
         self.bot = bot
         self.user_db: UserDB = bot.user_db
@@ -60,7 +61,7 @@ class BumpHandlerCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         """Listen for new messages to detect and process a successful bump."""
-        if message.guild and self._is_successful_bump_message(message):
+        if message.guild and message.guild.id == self.guild_id and self._is_successful_bump_message(message):
             log.info("Detected a new bump in message %s. Processing it.", message.id)
             await self._process_bump(message, is_new_bump=True)
 
@@ -83,9 +84,11 @@ class BumpHandlerCog(commands.Cog):
         try:
             if is_new_bump:
                 reward = random.randint(50, 80)
+                user_id = UserId(bumper.id)
+                guild_id = GuildId(message.guild.id)
                 # Reward Currency
-                await self.bot.stats_db.increment_stat(bumper.id, StatName.CURRENCY, reward)
-                new_bump_count = await self.bot.stats_db.increment_stat(bumper.id, StatName.BUMPS, 1)
+                await self.bot.stats_db.increment_stat(user_id, guild_id, StatName.CURRENCY, reward)
+                new_bump_count = await self.bot.stats_db.increment_stat(user_id, guild_id, StatName.BUMPS, 1)
                 log.info("Rewarded %s with $%d for bumping.", bumper.display_name, reward)
                 await channel.send(
                     f"🎉 Thanks for your **{new_bump_count:,}th** bump, {bumper.mention}! You've received **${reward}**.",
@@ -122,20 +125,28 @@ class BumpHandlerCog(commands.Cog):
 
         log.info("Scheduling bump reminder in %.2f seconds.", delay_seconds)
 
-        async def reminder_coro() -> None:
-            await asyncio.sleep(delay_seconds)
+        # Calculate the delay for the backup reminder. If the primary reminder is already late,
+        # this will be negative, and we'll adjust accordingly.
+        backup_delay_seconds = delay_seconds + BACKUP_REMINDER_DELAY.total_seconds()
 
+        async def reminder_coro() -> None:
             # Stage 1: Primary Reminder
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+
             await self._send_reminder_message(
                 channel,
                 last_bumper,
                 self.bumper_role_id,
                 is_backup=False,
             )
-
             # Stage 2: Backup Reminder (if configured)
             if self.backup_bumper_role_id:
-                await asyncio.sleep(BACKUP_REMINDER_DELAY.total_seconds())
+                # Calculate how long to wait from *now* until the backup is due.
+                # If the backup time is already in the past, this will be <= 0.
+                remaining_backup_wait = backup_delay_seconds - delay_seconds
+                if remaining_backup_wait > 0:
+                    await asyncio.sleep(remaining_backup_wait)
                 await self._send_reminder_message(
                     channel,
                     last_bumper,
@@ -149,7 +160,7 @@ class BumpHandlerCog(commands.Cog):
         self,
         channel: discord.TextChannel,
         last_bumper_mention: str,
-        role_id: int,
+        role_id: RoleId,
         *,
         is_backup: bool = False,
     ) -> None:

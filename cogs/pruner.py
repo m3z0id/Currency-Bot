@@ -5,6 +5,7 @@ from discord import Forbidden, HTTPException
 from discord.ext import commands, tasks
 
 from modules.KiwiBot import KiwiBot
+from modules.types import GuildId, RoleId
 from modules.UserDB import UserDB
 
 # Use Python's logging module for better diagnostics in a reusable component
@@ -16,8 +17,8 @@ class PrunerCog(commands.Cog):
         self,
         bot: KiwiBot,
         user_db: UserDB,
-        guild_id: int,
-        role_ids_to_prune: list[int],
+        guild_id: GuildId,
+        role_ids_to_prune: list[RoleId],
         inactivity_days: int = 14,
     ) -> None:
         self.bot = bot
@@ -38,6 +39,10 @@ class PrunerCog(commands.Cog):
     async def prune_loop(self) -> None:
         """Check for and prune inactive members."""
         log.info("Running automatic prune check for inactive members...")
+        # Guard clause to ensure this only runs for the privileged guild.
+        if not self.bot.get_guild(self.guild_id):
+            log.info("Pruner loop skipped: privileged guild not found.")
+            return
 
         guild = await self.bot.fetch_guild(self.guild_id)
         if not guild:
@@ -54,7 +59,7 @@ class PrunerCog(commands.Cog):
             )
 
         # Get inactive user IDs from the database
-        inactive_user_ids = await self.user_db.get_inactive_users(self.inactivity_days)
+        inactive_user_ids = await self.user_db.get_inactive_users(self.guild_id, self.inactivity_days)
         if not inactive_user_ids:
             log.info("No inactive users found in the database to prune.")
             return

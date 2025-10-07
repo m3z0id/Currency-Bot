@@ -5,6 +5,7 @@ from typing import Any
 import aiohttp
 
 from modules.Database import Database
+from modules.types import GuildId, InviterId, UserId
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +41,13 @@ class InvitesDB:
             await conn.commit()
             log.info("Initialized invites database table.")
 
-    async def insert_invite(self, invitee_id: int, inviter_id: str, guild_id: int, joined_at: str | None = None) -> bool:
+    async def insert_invite(
+        self,
+        invitee_id: UserId,
+        inviter_id: InviterId,
+        guild_id: GuildId,
+        joined_at: str | None = None,
+    ) -> bool:
         """Insert a new invite record.
 
         Returns True if a new row was added, False otherwise.
@@ -59,14 +66,14 @@ class InvitesDB:
             await conn.commit()
             return cursor.rowcount == 1
 
-    async def get_all_invitee_ids(self, guild_id: int) -> set[int]:
+    async def get_all_invitee_ids(self, guild_id: GuildId) -> set[UserId]:
         """Retrieve a set of all user IDs that have been invited in a guild."""
         async with self.database.get_cursor() as cursor:
             await cursor.execute("SELECT DISTINCT invitee FROM invites WHERE server = ?", (guild_id,))
             rows = await cursor.fetchall()
-            return {row[0] for row in rows}
+            return {UserId(row[0]) for row in rows}
 
-    async def get_invites_by_inviter(self, guild_id: int) -> dict[str, list[str]]:
+    async def get_invites_by_inviter(self, guild_id: GuildId) -> dict[InviterId, list[UserId]]:
         """Retrieve a dictionary mapping each inviter to a list of their invitees' IDs."""
         query = """
             SELECT inviter, GROUP_CONCAT(invitee)
@@ -74,13 +81,15 @@ class InvitesDB:
             WHERE server = ?
             GROUP BY inviter
         """
-        result = {}
+        result: dict[InviterId, list[UserId]] = {}
         async with self.database.get_cursor() as cursor:
             await cursor.execute(query, (guild_id,))
             rows = await cursor.fetchall()
             for inviter, invitees_str in rows:
                 if invitees_str:
-                    result[inviter] = invitees_str.split(",")
+                    inviter_id: InviterId = int(inviter)
+                    typed_invitees = [UserId(int(i)) for i in invitees_str.split(",")]
+                    result[UserId(inviter_id) if inviter_id != 0 else 0] = typed_invitees
         return result
 
     # --- Discord Raw API Operations ---

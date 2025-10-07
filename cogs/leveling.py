@@ -2,7 +2,7 @@ import asyncio
 import logging
 import string
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import discord
 from discord import app_commands
@@ -12,6 +12,7 @@ from modules.enums import StatName
 
 # Import the refactored logic and helpers
 from modules.leveling_utils import LevelBotProtocol, get_level, to_next_level
+from modules.types import ChannelId, GuildId, NonNegativeInt, UserId
 
 if TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
@@ -19,11 +20,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # UDP Server Configuration
-UDP_HOST = "127.0.0.1"
+UDP_HOST: Final[str] = "127.0.0.1"
 
 # --- Constants ---
-COOLDOWN_SECONDS = 5 * 60
-LONG_ABSENCE_BONUS_HOURS = 6
+COOLDOWN_SECONDS: Final[int] = 5 * 60
+LONG_ABSENCE_BONUS_HOURS: Final[int] = 6
 lowercase_letters = set(string.ascii_lowercase)
 
 
@@ -33,7 +34,7 @@ class LeaderboardView(discord.ui.View):
     def __init__(
         self,
         bot: "KiwiBot",
-        data: list[tuple[int, int]],
+        data: list[tuple[UserId, NonNegativeInt]],
         per_page: int = 10,
     ) -> None:
         super().__init__(timeout=180)
@@ -94,12 +95,12 @@ class LevelingCog(commands.Cog):
     def __init__(
         self,
         bot: "KiwiBot",
-        level_up_channel_id: int | None,
-        guild_id: int | None,
-        udp_port: int | None,
+        level_up_channel_id: ChannelId | None,
+        guild_id: GuildId | None,
+        udp_port: int | None,  # This is a port number, not an ID, so int is correct.
     ) -> None:
         self.bot = bot
-        self.last_activity_timestamps: dict[int, float] = {}
+        self.last_activity_timestamps: dict[tuple[int, int], float] = {}
         self.udp_transport: asyncio.DatagramTransport | None = None
         self.level_up_channel_id = level_up_channel_id
         self.guild_id = guild_id
@@ -126,29 +127,46 @@ class LevelingCog(commands.Cog):
             self.udp_transport.close()
             log.info("Leveling UDP server stopped.")
 
-    def _get_addable_xp(self, user_id: int) -> int:
+    def _get_addable_xp(self, user_id: UserId, guild_id: GuildId) -> int:
         """Determine if a user is eligible for XP based on cooldowns."""
         now = time.time()
-        seconds_since_last = now - self.last_activity_timestamps.get(user_id, 0)
+        user_key = (user_id, guild_id)
+        seconds_since_last = now - self.last_activity_timestamps.get(user_key, 0)
 
         if seconds_since_last > COOLDOWN_SECONDS:
-            self.last_activity_timestamps[user_id] = now
+            self.last_activity_timestamps[user_key] = now
             # Bonus for being away for more than 6 hours
             if seconds_since_last > (LONG_ABSENCE_BONUS_HOURS * 3600):
                 return 4  # Bonus for long absence
             return 1
         return 0
 
-    async def _handle_level_up_announcement(self, user_id: int, new_level: int, new_xp: int, source: str) -> None:
+    async def _handle_level_up_announcement(
+        self,
+        user_id: UserId,
+        guild_id: GuildId,
+        new_level: int,  # This is a calculated value, not an ID, so int is correct.
+        new_xp: int,
+        source: str,
+    ) -> None:
         """Format and send a level-up announcement to the configured channel."""
-        if not self.level_up_channel_id:
+        guild = self.bot.get_guild(guild_id)
+        if not guild:
             return
 
-        channel = self.bot.get_channel(self.level_up_channel_id)
+        channel = None
+        # 1. Prioritize the configured channel ID for the privileged guild
+        if guild.id == self.guild_id and self.level_up_channel_id:
+            channel = guild.get_channel(self.level_up_channel_id)
+
+        # 2. If no channel yet, fall back to searching by name in any guild
+        if not channel:
+            channel = discord.utils.find(lambda c: "level" in c.name.lower(), guild.text_channels)
+
         if not isinstance(channel, discord.TextChannel):
-            log.warning("Level-up channel ID %s is invalid or not found.", self.level_up_channel_id)
+            if not (guild.id == self.guild_id and self.level_up_channel_id):
+                log.debug("No level-up announcement channel found in guild %s.", guild.name)
             return
-
         user = self.bot.get_user(user_id)
         if not user:
             return
@@ -164,13 +182,13 @@ class LevelingCog(commands.Cog):
         embed.set_footer(text=f"You need {xp_for_next:,} more XP for the next level.")
         await channel.send(embed=embed)
 
-    async def _grant_xp(self, user_id: int, source: str, amount: int) -> None:
+    async def _grant_xp(self, user_id: UserId, guild_id: GuildId, source: str, amount: int) -> None:
         """Check eligibility and grant XP."""
-        if await self.bot.user_db.is_user_opted_out(user_id):
+        if await self.bot.user_db.is_user_opted_out(user_id, guild_id):
             return
 
         # Single atomic call to the enhanced database method
-        new_xp = await self.bot.stats_db.increment_stat(user_id, StatName.XP, amount)
+        new_xp = await self.bot.stats_db.increment_stat(UserId(user_id), GuildId(guild_id), StatName.XP, amount)
 
         # Safely derive the old XP from the result
         old_xp = new_xp - amount
@@ -181,7 +199,7 @@ class LevelingCog(commands.Cog):
         if new_level > old_level:
             log.info("User %d leveled up to %d from %s.", user_id, new_level, source)
             # Pass new_xp to the handler so it can calculate the footer
-            await self._handle_level_up_announcement(user_id, new_level, new_xp, source)
+            await self._handle_level_up_announcement(user_id, guild_id, new_level, new_xp, source)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -193,11 +211,11 @@ class LevelingCog(commands.Cog):
         if len(set(message.clean_content.lower()).intersection(lowercase_letters)) <= 3:  # noqa: PLR2004
             return
 
-        xp_to_add = self._get_addable_xp(message.author.id)
+        xp_to_add = self._get_addable_xp(UserId(message.author.id), GuildId(message.guild.id))
         if xp_to_add > 0:
-            await self._grant_xp(message.author.id, "message", xp_to_add)
+            await self._grant_xp(UserId(message.author.id), GuildId(message.guild.id), "message", xp_to_add)
 
-    async def grant_udp_xp(self, user_id: int) -> None:
+    async def grant_udp_xp(self, user_id: UserId) -> None:
         """Handle UDP-based XP for GUILD_ID."""
         if not self.guild_id:
             log.warning("Cannot grant UDP XP: GUILD_ID environment variable is not set.")
@@ -208,18 +226,19 @@ class LevelingCog(commands.Cog):
             # Don't grant XP if the user isn't in the specified server
             return
 
-        xp_to_add = self._get_addable_xp(user_id)
+        xp_to_add = self._get_addable_xp(UserId(user_id), self.guild_id)
         if xp_to_add > 0:
-            await self._grant_xp(user_id, "udp", xp_to_add)
+            await self._grant_xp(UserId(user_id), self.guild_id, "udp", xp_to_add)
 
     @level.command(name="opt-out", description="Exclude yourself from the leveling system.")
     async def level_opt_out(self, interaction: discord.Interaction) -> None:
         """Allow a user to opt-out without resetting their XP."""
-        if await self.bot.user_db.is_user_opted_out(interaction.user.id):
+        user_id, guild_id = UserId(interaction.user.id), GuildId(interaction.guild.id)
+        if await self.bot.user_db.is_user_opted_out(user_id, guild_id):
             await interaction.response.send_message("ℹ️ You are already opted out.", ephemeral=True)  # noqa: RUF001
             return
 
-        await self.bot.user_db.set_leveling_opt_out(interaction.user.id, True)
+        await self.bot.user_db.set_leveling_opt_out(user_id, guild_id, True)
         # The line resetting XP has been removed to fix the destructive behavior.
         await interaction.response.send_message(
             "✅ You are now excluded from the leveling system. Your XP is saved for when you return.",
@@ -229,11 +248,12 @@ class LevelingCog(commands.Cog):
     @level.command(name="opt-in", description="Re-include yourself in the leveling system.")
     async def level_opt_in(self, interaction: discord.Interaction) -> None:
         """Allow a user to opt back into the leveling system."""
-        if not await self.bot.user_db.is_user_opted_out(interaction.user.id):
+        user_id, guild_id = UserId(interaction.user.id), GuildId(interaction.guild.id)
+        if not await self.bot.user_db.is_user_opted_out(user_id, guild_id):
             await interaction.response.send_message("ℹ️ You are already opted in.", ephemeral=True)  # noqa: RUF001
             return
 
-        await self.bot.user_db.set_leveling_opt_out(interaction.user.id, False)
+        await self.bot.user_db.set_leveling_opt_out(user_id, guild_id, False)
         await interaction.response.send_message("✅ Welcome back! You will now gain XP again.", ephemeral=True)
 
     @level.command(name="rank", description="Check your or another user's rank.")
@@ -241,19 +261,20 @@ class LevelingCog(commands.Cog):
         """Display the level, XP, and rank of a user, with a progress bar."""
         target_user = member or interaction.user
         ephemeral = member is None or member.id == interaction.user.id
+        guild_id = GuildId(interaction.guild.id)
 
         if target_user.bot:
             await interaction.response.send_message("Bots do not participate in the leveling system.", ephemeral=True)
             return
 
-        if await self.bot.user_db.is_user_opted_out(target_user.id):
+        if await self.bot.user_db.is_user_opted_out(UserId(target_user.id), GuildId(interaction.guild.id)):
             await interaction.response.send_message(
                 f"ℹ️ {target_user.display_name} has opted out of the leveling system.",  # noqa: RUF001
                 ephemeral=ephemeral,
             )
             return
 
-        xp = await self.bot.stats_db.get_stat(target_user.id, StatName.XP)
+        xp = await self.bot.stats_db.get_stat(UserId(target_user.id), guild_id, StatName.XP)
         level = get_level(xp)
         xp_for_next = to_next_level(xp)
 
@@ -288,7 +309,7 @@ class LevelingCog(commands.Cog):
         await interaction.response.defer()
 
         # This now returns a pre-filtered list, fixing the N+1 query issue.
-        data = await self.bot.stats_db.get_leaderboard(StatName.XP, limit=200)
+        data = await self.bot.stats_db.get_leaderboard(GuildId(interaction.guild.id), StatName.XP, limit=200)
 
         if not data:
             await interaction.followup.send("The leaderboard is currently empty.")
@@ -305,12 +326,13 @@ class LevelingCog(commands.Cog):
         view = discord.ui.View(timeout=30)
 
         async def confirm_callback(interaction: discord.Interaction) -> None:
+            user_id, guild_id = UserId(member.id), GuildId(interaction.guild.id)
             # First, get the user's current XP
-            current_xp = await self.bot.stats_db.get_stat(member.id, StatName.XP)
+            current_xp = await self.bot.stats_db.get_stat(user_id, guild_id, StatName.XP)
 
             if current_xp > 0:
                 # If they have XP, reset it and confirm
-                await self.bot.stats_db.set_stat(member.id, StatName.XP, 0)
+                await self.bot.stats_db.set_stat(user_id, guild_id, StatName.XP, 0)
                 await interaction.response.edit_message(
                     content=f"✅ Successfully reset all XP for **{member.display_name}**.",
                     view=None,

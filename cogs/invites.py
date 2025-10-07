@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from modules.KiwiBot import KiwiBot
+from modules.types import ChannelId, GuildId, InviterId, UserId
 
 log = logging.getLogger(__name__)
 
@@ -17,84 +18,99 @@ class InvitesCog(commands.Cog):
     # 1. Define the parent group for all invite commands
     invites = app_commands.Group(name="invites", description="Commands for invite tracking.")
 
-    def __init__(self, bot: KiwiBot, guild_id: int, alert_channel_id: int) -> None:
+    def __init__(self, bot: KiwiBot, guild_id: GuildId, alert_channel_id: ChannelId) -> None:
         self.bot = bot
-        self.invites: dict[str, int] = {}
-        self.guild_id = guild_id
+        # The cache now maps guild_id to a dictionary of {invite_code: uses}
+        self.invites: dict[int, dict[str, int]] = {}
+        self.privileged_guild_id = guild_id
         self.alert_channel_id = alert_channel_id
         self.bot.loop.create_task(self.cache_invites())
 
     async def cache_invites(self) -> None:
-        """Cache the guild's invites on startup."""
+        """Cache invites for all guilds on startup."""
         await self.bot.wait_until_ready()
-        if not self.guild_id:
-            return
-
-        guild = self.bot.get_guild(self.guild_id)
-        if not guild:
-            log.error("Could not find guild with ID %s for invite caching.", self.guild_id)
-            return
-
-        try:
-            # Store invites with the code as the key and the uses as the value
-            self.invites = {invite.code: invite.uses for invite in await guild.invites()}
-            log.info(
-                "Successfully cached %s invites for guild %s.",
-                len(self.invites),
-                guild.name,
-            )
-        except discord.Forbidden:
-            log.exception(
-                "Bot lacks 'Manage Server' permissions to fetch invites for guild %s.",
-                guild.name,
-            )
-        except discord.HTTPException:
-            log.exception(
-                "An HTTP error occurred while fetching invites for guild %s.",
-                guild.name,
-            )
+        for guild in self.bot.guilds:
+            try:
+                # Store invites with the code as the key and the uses as the value
+                self.invites[guild.id] = {invite.code: invite.uses for invite in await guild.invites()}
+                log.info(
+                    "Successfully cached %s invites for guild %s.",
+                    len(self.invites[guild.id]),
+                    guild.name,
+                )
+            except discord.Forbidden:
+                log.warning(
+                    "Bot lacks 'Manage Server' permissions to fetch invites for guild %s.",
+                    guild.name,
+                )
+            except discord.HTTPException:
+                log.exception(
+                    "An HTTP error occurred while fetching invites for guild %s.",
+                    guild.name,
+                )
 
     @commands.Cog.listener()
-    async def on_member_join(self, member: discord.Member) -> None:
+    async def on_member_join(self, member: discord.Member) -> None:  # noqa: PLR0912
         """Handle new members joining the server and finds the inviter by diffing invite uses."""
-        if member.guild.id != self.guild_id or member.bot:
+        # This logic now runs for all guilds, not just the privileged one.
+        if member.bot:
             return
+
+        inviter = None
+        found_invite = None
+        try:
+            guild_invites = self.invites.get(member.guild.id, {})
+            current_invites = await member.guild.invites()
+            # Compare current invites with the cached invites to find the one that was used
+            for invite in current_invites:
+                if invite.code not in guild_invites or invite.uses > guild_invites.get(invite.code, 0):
+                    found_invite = invite
+                    inviter = invite.inviter
+                    break
+
+            # Update the cache with the new uses
+            self.invites[member.guild.id] = {invite.code: invite.uses for invite in current_invites}
+
+        except discord.Forbidden:
+            log.warning("Missing 'Manage Server' permissions to read invites for tracking.")
+            # Only send alert if in privileged guild
+            if member.guild.id == self.privileged_guild_id:
+                alert_channel = self.bot.get_channel(self.alert_channel_id)
+                if alert_channel:
+                    await alert_channel.send(
+                        f"⚠️ I don't have permission to view server invites to track who invited {member.mention}.",
+                    )
+            return
+        except discord.HTTPException:
+            log.exception("HTTP error fetching invites.")
+            # Only send alert if in privileged guild
+            if member.guild.id == self.privileged_guild_id:
+                alert_channel = self.bot.get_channel(self.alert_channel_id)
+                if alert_channel:
+                    await alert_channel.send(
+                        f"⚠️ An API error occurred while trying to find the inviter for {member.mention}.",
+                    )
+            return
+
+        # Determine the inviter's ID, defaulting to 0 if not found.
+        inviter_id: InviterId = UserId(inviter.id) if inviter else 0
+
+        # The database insertion and invite tracking now works for all guilds.
+        is_new_invite = await self.bot.invites_db.insert_invite(UserId(member.id), inviter_id, GuildId(member.guild.id))
+
+        # --- Privileged Guild Logic: Send alert to the configured channel ---
+        if member.guild.id != self.privileged_guild_id:
+            return  # Stop here for non-privileged guilds
 
         alert_channel = self.bot.get_channel(self.alert_channel_id)
         if not alert_channel or not isinstance(alert_channel, discord.TextChannel):
             log.warning("Could not find alert channel %s for invite tracking.", self.alert_channel_id)
             return
 
-        inviter = None
-        found_invite = None
-        try:
-            current_invites = await member.guild.invites()
-            # Compare current invites with the cached invites to find the one that was used
-            for invite in current_invites:
-                # If the invite is new or its use count has increased, it's the one we're looking for
-                if invite.code not in self.invites or invite.uses > self.invites.get(invite.code, 0):
-                    found_invite = invite
-                    inviter = invite.inviter
-                    break
-
-            # Update the cache with the new uses
-            self.invites = {invite.code: invite.uses for invite in current_invites}
-
-        except discord.Forbidden:
-            log.warning("Missing 'Manage Server' permissions to read invites for tracking.")
-            await alert_channel.send(f"⚠️ I don't have permission to view server invites to track who invited {member.mention}.")
-            return
-        except discord.HTTPException:
-            log.exception("HTTP error fetching invites.")
-            await alert_channel.send(f"⚠️ An API error occurred while trying to find the inviter for {member.mention}.")
-            return
-
         if not inviter:
             log.warning("Could not determine inviter for %s via invite usage.", member.name)
             await alert_channel.send(f"⚠️ Could not automatically determine the inviter for {member.mention}.")
             return
-
-        is_new_invite = await self.bot.invites_db.insert_invite(member.id, str(inviter.id), member.guild.id)
 
         result_color = discord.Color.blue() if is_new_invite else discord.Color.orange()
         result_title = "✅ New Invite Recorded" if is_new_invite else "Welcome Back!"
@@ -125,26 +141,24 @@ class InvitesCog(commands.Cog):
     @commands.Cog.listener()
     async def on_invite_create(self, invite: discord.Invite) -> None:
         """Handle new invite creation to keep the cache updated."""
-        if invite.guild and invite.guild.id == self.guild_id:
-            self.invites[invite.code] = invite.uses
+        if invite.guild:
+            if invite.guild.id not in self.invites:
+                self.invites[invite.guild.id] = {}
+            self.invites[invite.guild.id][invite.code] = invite.uses
             log.info("Cached new invite '%s' for guild '%s'.", invite.code, invite.guild.name)
 
     @commands.Cog.listener()
     async def on_invite_delete(self, invite: discord.Invite) -> None:
         """Handle invite deletion to keep the cache updated."""
-        if invite.guild and invite.guild.id == self.guild_id and invite.code in self.invites:
-            del self.invites[invite.code]
-            log.info(
-                "Removed deleted invite '%s' from cache for guild '%s'.",
-                invite.code,
-                invite.guild.name,
-            )
+        if invite.guild and invite.guild.id in self.invites and invite.code in self.invites[invite.guild.id]:
+            del self.invites[invite.guild.id][invite.code]
+            log.info("Removed deleted invite '%s' from cache for guild '%s'.", invite.code, invite.guild.name)
 
     @invites.command(name="top", description="Shows the invite leaderboard.")
     async def invites_top(self, interaction: discord.Interaction) -> None:
         """Display the top 10 inviters in an embed."""
         await interaction.response.defer()
-        mapping = await self.bot.invites_db.get_invites_by_inviter(interaction.guild.id)
+        mapping = await self.bot.invites_db.get_invites_by_inviter(GuildId(interaction.guild.id))
 
         embed = discord.Embed(title="🏆 Top Invites Leaderboard", color=discord.Color.gold())
 
@@ -158,8 +172,10 @@ class InvitesCog(commands.Cog):
         leaderboard_text = ""
         emojis = ["🥇", "🥈", "🥉"]
         for i, (user_id, invited_list) in enumerate(sorted_inviters[:10]):
+            # Check the type of user_id before creating a mention
             rank = emojis[i] if i < len(emojis) else f"**#{i + 1}**"
-            leaderboard_text += f"{rank} <@{user_id}> — **{len(invited_list)}** invites\n"
+            user_display = f"<@{user_id}>" if user_id != 0 else "Unknown Inviter"
+            leaderboard_text += f"{rank} {user_display} — **{len(invited_list)}** invites\n"
 
         embed.description = leaderboard_text
         await interaction.followup.send(embed=embed)
@@ -168,8 +184,8 @@ class InvitesCog(commands.Cog):
     async def invites_mylist(self, interaction: discord.Interaction) -> None:
         """Show a list of members invited by the user."""
         await interaction.response.defer(ephemeral=True)
-        all_invites = await self.bot.invites_db.get_invites_by_inviter(interaction.guild.id)
-        user_invites = all_invites.get(str(interaction.user.id), [])
+        all_invites = await self.bot.invites_db.get_invites_by_inviter(GuildId(interaction.guild.id))
+        user_invites = all_invites.get(interaction.user.id, [])
 
         embed = discord.Embed(title="Your Invited Members", color=discord.Color.purple())
 
@@ -189,8 +205,9 @@ class InvitesCog(commands.Cog):
         await interaction.followup.send("Starting bulk import... this may take a while.")
 
         try:
-            existing_invitees = await self.bot.invites_db.get_all_invitee_ids(interaction.guild.id)
-            all_members = await self.bot.invites_db.get_all_guild_members_api(interaction.guild.id)
+            guild_id = GuildId(interaction.guild.id)
+            existing_invitees = await self.bot.invites_db.get_all_invitee_ids(guild_id)
+            all_members = await self.bot.invites_db.get_all_guild_members_api(guild_id)
         except Exception:
             log.exception("Error during bulk import preparation.")
             await interaction.followup.send("An error occurred during preparation")
@@ -208,7 +225,7 @@ class InvitesCog(commands.Cog):
 
             try:
                 member_info = member_data["member"]
-                invitee_id = int(member_info["user"]["id"])
+                invitee_id = UserId(int(member_info["user"]["id"]))
                 joined_at = member_info.get("joined_at")
             except (KeyError, ValueError):
                 continue
@@ -220,7 +237,7 @@ class InvitesCog(commands.Cog):
             if invitee_id in existing_invitees:
                 continue
 
-            if await self.bot.invites_db.insert_invite(invitee_id, inviter_id, interaction.guild.id, joined_at):
+            if await self.bot.invites_db.insert_invite(invitee_id, UserId(inviter_id), guild_id, joined_at):
                 new_imports += 1
 
         await interaction.followup.send(f"Import complete. Added {new_imports} new invite records.")

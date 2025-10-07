@@ -1,13 +1,14 @@
 import logging
 import random
 import string
-from typing import ClassVar
+from typing import Final
 
 from discord import app_commands
 from discord.ext import commands
 
 from modules.enums import StatName
 from modules.KiwiBot import KiwiBot
+from modules.types import GuildId, UserId
 
 log = logging.getLogger(__name__)
 
@@ -15,7 +16,7 @@ cooldown = 3600 * 6  # Every 6 hours
 
 
 class Sell(commands.Cog):
-    LIMBS: ClassVar[tuple[str, ...]] = (
+    LIMBS: Final[tuple[str, ...]] = (
         "Left Arm",
         "Right Arm",
         "Left Hand",
@@ -23,7 +24,7 @@ class Sell(commands.Cog):
         "Head",
         "Torso",
     )
-    ORGANS: ClassVar[tuple[str, ...]] = (
+    ORGANS: Final[tuple[str, ...]] = (
         "Brain",
         "Heart",
         "Left Kidney",
@@ -59,7 +60,14 @@ class Sell(commands.Cog):
             return
 
         random_num = random.randint(1, 20)
-        await self.bot.stats_db.increment_stat(ctx.author.id, StatName.CURRENCY, random_num)
+        guild_id = GuildId(ctx.guild.id)
+        user_id = UserId(ctx.author.id)
+        await self.bot.stats_db.increment_stat(
+            user_id,
+            guild_id,
+            StatName.CURRENCY,
+            random_num,
+        )
 
         log.info(
             "User %s has sold wndx2's %s for %d.",

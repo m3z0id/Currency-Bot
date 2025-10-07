@@ -6,24 +6,25 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cogs.leveling import LevelingCog
+    from modules.types import NonNegativeInt
 
 log = logging.getLogger(__name__)
 
 # --- Level Calculation Helpers ---
 
 
-def get_raw_level(xp: int) -> float:
+def get_raw_level(xp: "NonNegativeInt") -> float:
     """Calculate the raw, fractional level for a given XP amount."""
     # The formula implies a base requirement of 6 XP to start leveling.
     return max(xp - 6, 0) ** (1 / 2.5)
 
 
-def get_level(xp: int) -> int:
+def get_level(xp: "NonNegativeInt") -> int:
     """Calculate the whole number level for a given XP amount."""
     return math.floor(get_raw_level(xp))
 
 
-def to_next_level(xp: int) -> int:
+def to_next_level(xp: "NonNegativeInt") -> int:
     """Calculate the XP needed to reach the next level."""
     # Add a small epsilon to handle floating point inaccuracies at level boundaries
     current_level = get_level(xp)

@@ -1,44 +1,49 @@
 import logging
+from typing import override
 
 import discord
 from discord.ext import commands, tasks
 
 from modules.KiwiBot import KiwiBot
+from modules.types import GuildId, UserGuildPair, UserId
 
 log = logging.getLogger(__name__)
 
 
 class Activity(commands.Cog):
-    """Cog to handle user activity tracking and database updates."""
+    """Handle user activity tracking and database updates."""
 
     def __init__(self, bot: KiwiBot) -> None:
         self.bot = bot
-        self.activity_cache: set[int] = set()
+        self.activity_cache: set[UserGuildPair] = set()
         self.flush_activity_cache.start()
 
+    @override
     def cog_unload(self) -> None:
         """Cancel the background task when the cog is unloaded."""
         self.flush_activity_cache.cancel()
 
-    def _cache_user_activity(self, user: discord.User | discord.Member) -> None:
-        """Add a user to the activity cache."""
+    def _cache_user_activity(self, user: discord.User | discord.Member, guild_id: GuildId) -> None:
+        """Add a user and their guild to the activity cache."""
         if user.bot:
             return
 
-        self.activity_cache.add(user.id)
-        log.debug("Cached activity for user %d", user.id)
+        self.activity_cache.add((UserId(user.id), guild_id))
+        log.debug("Cached activity for user %d in guild %d", user.id, guild_id)
 
     @commands.Cog.listener()
+    @override
     async def on_message(self, message: discord.Message) -> None:
         """Listen to messages to track user activity."""
         if message.guild:
-            self._cache_user_activity(message.author)
+            self._cache_user_activity(message.author, GuildId(message.guild.id))
 
     @commands.Cog.listener()
+    @override
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Listen to interactions to track user activity."""
         if interaction.guild and interaction.user:
-            self._cache_user_activity(interaction.user)
+            self._cache_user_activity(interaction.user, GuildId(interaction.guild.id))
 
     @tasks.loop(seconds=60)
     async def flush_activity_cache(self) -> None:
@@ -52,9 +57,10 @@ class Activity(commands.Cog):
                 "Flushed %d user activities to database",
                 len(self.activity_cache),
             )
-            self.activity_cache.clear()
         except Exception:
             log.exception("Error in flush_activity_cache background task")
+        finally:
+            self.activity_cache.clear()
 
 
 async def setup(bot: KiwiBot) -> None:

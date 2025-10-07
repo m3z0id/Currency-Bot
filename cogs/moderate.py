@@ -1,10 +1,12 @@
 import datetime
 import logging
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+from modules.types import RoleId
 
 if TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
@@ -13,7 +15,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # A dictionary to convert user-friendly time units to timedelta objects
-TIME_UNITS = {
+TIME_UNITS: Final[dict[str, str]] = {
     "s": "seconds",
     "m": "minutes",
     "h": "hours",
@@ -60,7 +62,7 @@ class Moderate(commands.Cog):
     Provides slash commands for banning, kicking, muting, and timing out members.
     """
 
-    def __init__(self, bot: "KiwiBot", muted_role_id: int | None) -> None:
+    def __init__(self, bot: "KiwiBot", muted_role_id: RoleId | None) -> None:
         self.bot = bot
         self.muted_role_id = muted_role_id
 

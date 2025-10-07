@@ -3,11 +3,13 @@
 import logging
 import re
 from collections import defaultdict
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast, override
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+from modules.types import AnalysisStatus, MessageId, is_guild_message
 
 if TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
@@ -15,7 +17,6 @@ else:
     KiwiBot = commands.Bot
 
 # A structured dictionary for analysis results, improving code clarity.
-AnalysisStatus = Literal["OK", "ERROR", "WARN"]
 
 
 class AnalysisResult(TypedDict):
@@ -60,7 +61,7 @@ class ReactionRoles(commands.Cog):
     def __init__(self, bot: KiwiBot) -> None:
         self.bot = bot
         # --- Message Caching ---
-        self.analysis_cache: dict[int, list[AnalysisResult]] = {}
+        self.analysis_cache: dict[MessageId, list[AnalysisResult]] = {}
         self.MAX_CACHE_SIZE = 128
 
         self.debug_reaction_role_menu = app_commands.ContextMenu(
@@ -69,6 +70,7 @@ class ReactionRoles(commands.Cog):
         )
         self.bot.tree.add_command(self.debug_reaction_role_menu)
 
+    @override
     async def cog_unload(self) -> None:
         """Remove the context menu command when the cog is unloaded."""
         self.bot.tree.remove_command(
@@ -85,25 +87,27 @@ class ReactionRoles(commands.Cog):
         Caches results to avoid re-computing for the same message.
         This is the single source of truth for all reaction role logic.
 
-        Returns:
+        Returns
+        -------
             A list of AnalysisResult dictionaries, one for each parsed line.
             Returns an empty list if the message author is not an administrator.
 
         """
+        message_id = MessageId(message.id)
         # 1. Check Cache
-        if message.id in self.analysis_cache:
-            return self.analysis_cache[message.id]
+        if message_id in self.analysis_cache:
+            return self.analysis_cache[message_id]
 
         # The rest of the function performs the analysis if not found in cache.
         # This is the single source of truth for all reaction role logic.
 
         # 2. Perform Analysis
         results: list[AnalysisResult] = []
-        if not isinstance(message.author, discord.Member):
-            return []  # Cannot be a reaction role message if author isn't a guild member.
+        if not is_guild_message(message):
+            return []
 
         # 1. Author Validation: Must be an manage_roles.
-        if not message.author.guild_permissions.manage_roles:
+        if not message.author.guild_permissions.manage_roles:  # ty now knows message.author is a Member
             return []
 
         # 3. Line-by-Line Analysis
@@ -184,17 +188,20 @@ class ReactionRoles(commands.Cog):
             # Remove the oldest item (FIFO)
             del self.analysis_cache[next(iter(self.analysis_cache))]
 
-        self.analysis_cache[message.id] = results
+        self.analysis_cache[message_id] = results
         return results
 
     @commands.Cog.listener()
+    @override
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
         """Invalidate the cache if a potential reaction role message is edited."""
-        if payload.message_id in self.analysis_cache:
-            del self.analysis_cache[payload.message_id]
+        message_id = MessageId(payload.message_id)
+        if message_id in self.analysis_cache:
+            del self.analysis_cache[message_id]
             log.info("Invalidated reaction role cache for edited message ID %s.", payload.message_id)
 
     @commands.Cog.listener()
+    @override
     async def on_raw_reaction_add(
         self,
         payload: discord.RawReactionActionEvent,
@@ -203,6 +210,7 @@ class ReactionRoles(commands.Cog):
         await self._handle_reaction_event(payload)
 
     @commands.Cog.listener()
+    @override
     async def on_raw_reaction_remove(
         self,
         payload: discord.RawReactionActionEvent,

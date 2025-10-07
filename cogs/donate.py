@@ -6,6 +6,7 @@ from discord.ext import commands
 
 from modules.enums import StatName
 from modules.KiwiBot import KiwiBot
+from modules.types import GuildId, UserId, is_positive
 
 log = logging.getLogger(__name__)
 
@@ -32,13 +33,26 @@ class Donate(commands.Cog):
             await ctx.send("You cannot donate to yourself.", ephemeral=True)
             return
 
-        if (balance := await self.bot.stats_db.get_stat(ctx.author.id, StatName.CURRENCY)) < amount:
+        guild_id = GuildId(ctx.guild.id)
+        sender_id = UserId(ctx.author.id)
+        receiver_id = UserId(receiver.id)
+
+        if (balance := await self.bot.stats_db.get_stat(sender_id, guild_id, StatName.CURRENCY)) < amount:
             await ctx.send(f"Insufficient funds! You have ${balance}")
             return
 
+        # The command framework already ensures amount > 0.
+        # We now use our TypeGuard to inform MyPy of this fact.
+        if not is_positive(amount):
+            # This branch is logically unreachable due to commands.Range,
+            # but it satisfies the type checker.
+            await ctx.send("Amount must be positive.", ephemeral=True)
+            return
+
         success = await self.bot.stats_db.transfer_stat(
-            sender_id=ctx.author.id,
-            receiver_id=receiver.id,
+            sender_id=sender_id,
+            receiver_id=receiver_id,
+            guild_id=guild_id,
             stat=StatName.CURRENCY,
             amount=amount,
         )

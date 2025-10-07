@@ -24,7 +24,7 @@ class Leaderboard(commands.Cog):
 
         # Fetch the leaderboard data from the database
         stat_enum = StatName(stat.value)
-        top_users = await self.bot.stats_db.get_leaderboard(stat_enum, limit=10)
+        top_users = await self.bot.stats_db.get_leaderboard(interaction.guild.id, stat_enum, limit=10)
 
         if not top_users:
             await interaction.followup.send(f"Nobody is on the {stat.name} leaderboard yet!", ephemeral=True)

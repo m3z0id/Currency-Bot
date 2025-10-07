@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING
 import discord
 from discord.ext import commands
 
+from modules.types import ChannelId, GuildId
+
 if TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
 
@@ -13,14 +15,18 @@ log = logging.getLogger(__name__)
 class JoinLeaveLogCog(commands.Cog):
     """A cog for logging member join and leave events to a specified channel."""
 
-    def __init__(self, bot: "KiwiBot", channel_id: int) -> None:
+    def __init__(self, bot: "KiwiBot", guild_id: GuildId, channel_id: ChannelId) -> None:
         self.bot = bot
+        self.privileged_guild_id = guild_id
         self.channel_id = channel_id
         self.log_channel: discord.TextChannel | None = None
 
     async def cog_load(self) -> None:
         """Fetch the channel object when the cog is loaded."""
-        channel = await self.bot.fetch_channel(self.channel_id)
+        # Only attempt to fetch the channel if we are in the privileged guild context
+        if not self.bot.get_guild(self.privileged_guild_id):
+            return
+        channel = self.bot.get_channel(self.channel_id)
         if isinstance(channel, discord.TextChannel):
             self.log_channel = channel
             log.info("Join/Leave logging channel set to #%s", self.log_channel.name)
@@ -64,6 +70,9 @@ class JoinLeaveLogCog(commands.Cog):
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
         """Handle logging when a new member joins or rejoins the server."""
+        if member.guild.id != self.privileged_guild_id:
+            return
+
         # Use the did_rejoin flag to determine the event type
         if member.flags.did_rejoin:
             title = "Member Rejoined"
@@ -92,6 +101,9 @@ class JoinLeaveLogCog(commands.Cog):
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member) -> None:
         """Handle logging when a member leaves the server."""
+        if member.guild.id != self.privileged_guild_id:
+            return
+
         title = "Member Left"
         color = discord.Colour.orange()
 
@@ -117,10 +129,16 @@ class JoinLeaveLogCog(commands.Cog):
 
 async def setup(bot: "KiwiBot") -> None:
     """Add the cog to the bot."""
-    if not bot.config.join_leave_log_channel_id:
+    if not all([bot.config.guild_id, bot.config.join_leave_log_channel_id]):
         log.warning(
-            "JOIN_LEAVE_LOG_CHANNEL_ID is not configured. JoinLeaveLogCog will not be loaded.",
+            "GUILD_ID or JOIN_LEAVE_LOG_CHANNEL_ID is not configured. JoinLeaveLogCog will not be loaded.",
         )
         return
 
-    await bot.add_cog(JoinLeaveLogCog(bot, bot.config.join_leave_log_channel_id))
+    await bot.add_cog(
+        JoinLeaveLogCog(
+            bot,
+            guild_id=bot.config.guild_id,
+            channel_id=bot.config.join_leave_log_channel_id,
+        ),
+    )

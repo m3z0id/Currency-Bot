@@ -6,6 +6,7 @@ from discord.ext import commands
 
 from modules.enums import StatName
 from modules.KiwiBot import KiwiBot
+from modules.types import GuildId, UserId
 
 log = logging.getLogger(__name__)
 
@@ -22,8 +23,11 @@ class Bal(commands.Cog):
         # If no member is provided, default to the command author.
         target_member = member or ctx.author
 
-        currency_balance = await self.bot.stats_db.get_stat(target_member.id, StatName.CURRENCY)
-        bump_count = await self.bot.stats_db.get_stat(target_member.id, StatName.BUMPS)
+        user_id = UserId(target_member.id)
+        guild_id = GuildId(ctx.guild.id)
+
+        currency_balance = await self.bot.stats_db.get_stat(user_id, guild_id, StatName.CURRENCY)
+        bump_count = await self.bot.stats_db.get_stat(user_id, guild_id, StatName.BUMPS)
         description = f"{target_member.mention}\nWallet: ${currency_balance:,}"
         if bump_count > 0:
             description += f"\nBumps: {bump_count}"
