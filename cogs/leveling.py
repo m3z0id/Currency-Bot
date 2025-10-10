@@ -34,7 +34,7 @@ class LeaderboardView(discord.ui.View):
     def __init__(
         self,
         bot: "KiwiBot",
-        data: list[tuple[UserId, NonNegativeInt]],
+        data: list[tuple[int, UserId, NonNegativeInt]],
         per_page: int = 10,
     ) -> None:
         super().__init__(timeout=180)
@@ -59,10 +59,11 @@ class LeaderboardView(discord.ui.View):
         )
 
         description = []
-        for i, (user_id, xp) in enumerate(page_data, start=start + 1):
+        # Unpack the (rank, user_id, xp) tuple directly from the data
+        for rank, user_id, xp in page_data:
             user = self.bot.get_user(user_id) or f"Unknown User ({user_id})"
             level = get_level(xp)
-            description.append(f"`{i}.` **{user}** - Level {level} ({xp:,} XP)")
+            description.append(f"`{rank}.` **{user}** - Level {level} ({xp:,} XP)")
 
         if not description:
             description.append("The leaderboard is empty!")
@@ -188,7 +189,7 @@ class LevelingCog(commands.Cog):
             return
 
         # Single atomic call to the enhanced database method
-        new_xp = await self.bot.stats_db.increment_stat(UserId(user_id), GuildId(guild_id), StatName.XP, amount)
+        new_xp = await self.bot.user_db.increment_stat(UserId(user_id), GuildId(guild_id), StatName.XP, amount)
 
         # Safely derive the old XP from the result
         old_xp = new_xp - amount
@@ -264,7 +265,7 @@ class LevelingCog(commands.Cog):
         guild_id = GuildId(interaction.guild.id)
 
         if target_user.bot:
-            await interaction.response.send_message("Bots do not participate in the leveling system.", ephemeral=True)
+            await interaction.response.send_message("Nice try but us bots don't do that.", ephemeral=True)
             return
 
         if await self.bot.user_db.is_user_opted_out(UserId(target_user.id), GuildId(interaction.guild.id)):
@@ -274,7 +275,7 @@ class LevelingCog(commands.Cog):
             )
             return
 
-        xp = await self.bot.stats_db.get_stat(UserId(target_user.id), guild_id, StatName.XP)
+        xp = await self.bot.user_db.get_stat(UserId(target_user.id), guild_id, StatName.XP)
         level = get_level(xp)
         xp_for_next = to_next_level(xp)
 
@@ -309,7 +310,7 @@ class LevelingCog(commands.Cog):
         await interaction.response.defer()
 
         # This now returns a pre-filtered list, fixing the N+1 query issue.
-        data = await self.bot.stats_db.get_leaderboard(GuildId(interaction.guild.id), StatName.XP, limit=200)
+        data = await self.bot.user_db.get_leaderboard(GuildId(interaction.guild.id), StatName.XP, limit=200)
 
         if not data:
             await interaction.followup.send("The leaderboard is currently empty.")
@@ -328,11 +329,11 @@ class LevelingCog(commands.Cog):
         async def confirm_callback(interaction: discord.Interaction) -> None:
             user_id, guild_id = UserId(member.id), GuildId(interaction.guild.id)
             # First, get the user's current XP
-            current_xp = await self.bot.stats_db.get_stat(user_id, guild_id, StatName.XP)
+            current_xp = await self.bot.user_db.get_stat(user_id, guild_id, StatName.XP)
 
             if current_xp > 0:
                 # If they have XP, reset it and confirm
-                await self.bot.stats_db.set_stat(user_id, guild_id, StatName.XP, 0)
+                await self.bot.user_db.set_stat(user_id, guild_id, StatName.XP, 0)
                 await interaction.response.edit_message(
                     content=f"✅ Successfully reset all XP for **{member.display_name}**.",
                     view=None,

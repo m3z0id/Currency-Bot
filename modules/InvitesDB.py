@@ -1,3 +1,11 @@
+"""Manages invite tracking data, including API interactions and database storage.
+
+This module handles the persistence of invite relationships between users.
+The schema for the `invites` table includes strict checks to ensure data integrity,
+such as validating that IDs are legitimate Discord Snowflakes and handling the
+special case where an inviter is unknown (represented by `inviter_id = 0`).
+"""
+
 import logging
 import os
 from typing import Any
@@ -30,12 +38,13 @@ class InvitesDB:
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS invites (
-                    invitee INTEGER NOT NULL,
-                    inviter INTEGER NOT NULL,
-                    server INTEGER NOT NULL,
-                    time TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
-                    PRIMARY KEY (invitee, server)
-                );
+                    invitee_id INTEGER NOT NULL CHECK(invitee_id > 1000000),
+                    guild_id INTEGER NOT NULL CHECK(guild_id > 1000000),
+                    inviter_id INTEGER, -- Can be NULL if inviter is unknown
+                    joined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+                    PRIMARY KEY (invitee_id, guild_id),
+                    CHECK(invitee_id <> inviter_id)
+                ) STRICT, WITHOUT ROWID;
                 """,
             )
             await conn.commit()
@@ -52,14 +61,29 @@ class InvitesDB:
 
         Returns True if a new row was added, False otherwise.
         """
+        if invitee_id == inviter_id:
+            log.info("User %s invited themself in %s", invitee_id, guild_id)
+            return False
+
         async with self.database.get_conn() as conn:
             if joined_at:
-                # If a join time is provided, use it
-                sql = "INSERT OR IGNORE INTO invites (invitee, inviter, server, time) VALUES (?, ?, ?, ?)"
-                params = (invitee_id, inviter_id, guild_id, joined_at)
+                sql = """
+                    INSERT INTO invites (invitee_id, guild_id, inviter_id, joined_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(invitee_id, guild_id) DO NOTHING
+                """
+                params: tuple[int | str | None, ...] = (
+                    invitee_id,
+                    guild_id,
+                    inviter_id,
+                    joined_at,
+                )
             else:
-                # Otherwise, let the database use the default current time
-                sql = "INSERT OR IGNORE INTO invites (invitee, inviter, server) VALUES (?, ?, ?)"
+                sql = """
+                    INSERT INTO invites (invitee_id, inviter_id, guild_id)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(invitee_id, guild_id) DO NOTHING
+                """
                 params = (invitee_id, inviter_id, guild_id)
 
             cursor = await conn.execute(sql, params)
@@ -69,17 +93,20 @@ class InvitesDB:
     async def get_all_invitee_ids(self, guild_id: GuildId) -> set[UserId]:
         """Retrieve a set of all user IDs that have been invited in a guild."""
         async with self.database.get_cursor() as cursor:
-            await cursor.execute("SELECT DISTINCT invitee FROM invites WHERE server = ?", (guild_id,))
+            await cursor.execute(
+                "SELECT DISTINCT invitee_id FROM invites WHERE guild_id = ?",
+                (guild_id,),
+            )
             rows = await cursor.fetchall()
             return {UserId(row[0]) for row in rows}
 
     async def get_invites_by_inviter(self, guild_id: GuildId) -> dict[InviterId, list[UserId]]:
         """Retrieve a dictionary mapping each inviter to a list of their invitees' IDs."""
         query = """
-            SELECT inviter, GROUP_CONCAT(invitee)
+            SELECT inviter_id, GROUP_CONCAT(invitee_id)
             FROM invites
-            WHERE server = ?
-            GROUP BY inviter
+            WHERE guild_id = ?
+            GROUP BY inviter_id
         """
         result: dict[InviterId, list[UserId]] = {}
         async with self.database.get_cursor() as cursor:
@@ -87,10 +114,26 @@ class InvitesDB:
             rows = await cursor.fetchall()
             for inviter, invitees_str in rows:
                 if invitees_str:
-                    inviter_id: InviterId = int(inviter)
+                    inviter_id: InviterId = UserId(inviter) if inviter is not None else None
                     typed_invitees = [UserId(int(i)) for i in invitees_str.split(",")]
-                    result[UserId(inviter_id) if inviter_id != 0 else 0] = typed_invitees
+                    result[inviter_id] = typed_invitees
         return result
+
+    async def get_invite_leaderboard(self, guild_id: GuildId) -> list[tuple[UserId, int]]:
+        """Retrieve the top 10 inviters and their invite counts for a guild."""
+        query = """
+            SELECT inviter_id, COUNT(invitee_id) as invite_count
+            FROM invites
+            WHERE guild_id = ? AND inviter_id IS NOT NULL
+            GROUP BY inviter_id
+            ORDER BY invite_count DESC
+            LIMIT 10;
+        """
+        async with self.database.get_cursor() as cursor:
+            await cursor.execute(query, (guild_id,))
+            rows = await cursor.fetchall()
+            # Ensure inviter_id is not None before casting to UserId
+            return [(UserId(inviter_id), invite_count) for inviter_id, invite_count in rows if inviter_id is not None]
 
     # --- Discord Raw API Operations ---
 
@@ -100,7 +143,10 @@ class InvitesDB:
         payload = {"query": username, "limit": 5}
 
         try:
-            async with aiohttp.ClientSession(headers=API_HEADERS) as session, session.get(api_url, params=payload) as resp:
+            async with (
+                aiohttp.ClientSession(headers=API_HEADERS) as session,
+                session.get(api_url, params=payload) as resp,
+            ):
                 resp.raise_for_status()
                 members = await resp.json()
                 if not members:

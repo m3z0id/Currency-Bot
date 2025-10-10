@@ -23,8 +23,8 @@ type UserGuildPair = tuple[UserId, GuildId]
 type ReminderPreference = Literal["ONCE", "ALWAYS", "NEVER"]
 type AnalysisStatus = Literal["OK", "ERROR", "WARN"]
 
-# A specific type for an inviter ID, which can be a real user or the sentinel value 0.
-type InviterId = UserId | Literal[0]
+# A specific type for an inviter ID, which can be a real user or unknown (None).
+type InviterId = UserId | None
 
 # A new nominal type for integers that represent quantities and should be positive.
 PositiveInt = NewType("PositiveInt", int)

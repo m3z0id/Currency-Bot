@@ -169,22 +169,15 @@ class Daily(commands.Cog):
     async def daily_management_task(self) -> None:
         """Handle daily resets and reminders using pure bulk operations."""
         log.info("Starting daily management task...")
-        all_reminders_to_send = []
-
-        # Iterate over each guild to process resets independently.
-        for guild in self.bot.guilds:
-            try:
-                # Atomically reset daily claims for the guild and fetch users needing a reminder.
-                users_to_remind_in_guild = await self.bot.user_db.process_daily_reset(GuildId(guild.id))
-                if users_to_remind_in_guild:
-                    all_reminders_to_send.extend(users_to_remind_in_guild)
-            except Exception:
-                log.exception("Failed to process daily reset for guild %d", guild.id)
 
         try:
-            if all_reminders_to_send:
-                log.info("Preparing to send %d daily reminders.", len(all_reminders_to_send))
-                await self.send_reminders(set(all_reminders_to_send))
+            # One atomic database call for all guilds.
+            users_to_remind = await self.bot.user_db.process_daily_reset_all()
+
+            if users_to_remind:
+                log.info("Preparing to send %d daily reminders.", len(users_to_remind))
+                # Use a set to automatically handle duplicate user IDs if they exist across guilds
+                await self.send_reminders(set(users_to_remind))
 
         except Exception:
             log.exception("An error occurred during the daily management task.")
@@ -268,7 +261,7 @@ class Daily(commands.Cog):
             random.randint(101, 2000) if random.random() < 0.01 else random.randint(50, 100)  # noqa: PLR2004
         )
 
-        new_balance = await self.bot.stats_db.increment_stat(
+        new_balance = await self.bot.user_db.increment_stat(
             UserId(ctx.author.id),
             GuildId(ctx.guild.id),
             StatName.CURRENCY,

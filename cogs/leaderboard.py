@@ -11,7 +11,10 @@ class Leaderboard(commands.Cog):
     def __init__(self, bot: KiwiBot) -> None:
         self.bot = bot
 
-    @app_commands.command(name="leaderboard", description="Displays the server leaderboard for a specific stat.")
+    @app_commands.command(
+        name="leaderboard",
+        description="Displays the server leaderboard for a specific stat.",
+    )
     @app_commands.choices(
         stat=[
             app_commands.Choice(name="💰 Currency", value=StatName.CURRENCY.value),
@@ -24,7 +27,7 @@ class Leaderboard(commands.Cog):
 
         # Fetch the leaderboard data from the database
         stat_enum = StatName(stat.value)
-        top_users = await self.bot.stats_db.get_leaderboard(interaction.guild.id, stat_enum, limit=10)
+        top_users = await self.bot.user_db.get_leaderboard(interaction.guild.id, stat_enum, limit=10)
 
         if not top_users:
             await interaction.followup.send(f"Nobody is on the {stat.name} leaderboard yet!", ephemeral=True)
@@ -37,7 +40,7 @@ class Leaderboard(commands.Cog):
         )
 
         description = []
-        for rank, (user_id, value) in enumerate(top_users, 1):
+        for rank, user_id, value in top_users:
             user_display = f"<@{user_id}>"
             prefix = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"**{rank}.**")
             description.append(f"{prefix} {user_display}: `{value:,}`")

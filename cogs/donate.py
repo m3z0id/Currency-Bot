@@ -37,7 +37,7 @@ class Donate(commands.Cog):
         sender_id = UserId(ctx.author.id)
         receiver_id = UserId(receiver.id)
 
-        if (balance := await self.bot.stats_db.get_stat(sender_id, guild_id, StatName.CURRENCY)) < amount:
+        if (balance := await self.bot.user_db.get_stat(sender_id, guild_id, StatName.CURRENCY)) < amount:
             await ctx.send(f"Insufficient funds! You have ${balance}")
             return
 
@@ -49,12 +49,13 @@ class Donate(commands.Cog):
             await ctx.send("Amount must be positive.", ephemeral=True)
             return
 
-        success = await self.bot.stats_db.transfer_stat(
+        success = await self.bot.user_db.transfer_currency(
             sender_id=sender_id,
             receiver_id=receiver_id,
             guild_id=guild_id,
-            stat=StatName.CURRENCY,
             amount=amount,
+            # Pass the transactions_db instance required by the new method
+            transactions_db=self.bot.transactions_db,
         )
 
         if success:

@@ -24,10 +24,14 @@ class InvitesCog(commands.Cog):
         self.invites: dict[int, dict[str, int]] = {}
         self.privileged_guild_id = guild_id
         self.alert_channel_id = alert_channel_id
-        self.bot.loop.create_task(self.cache_invites())
 
-    async def cache_invites(self) -> None:
+    async def cog_load(self) -> None:
         """Cache invites for all guilds on startup."""
+        await self.recache_all_invites()
+
+    async def recache_all_invites(self) -> None:
+        """Clear and re-populate the invite cache for all guilds."""
+        self.invites.clear()
         await self.bot.wait_until_ready()
         for guild in self.bot.guilds:
             try:
@@ -48,6 +52,12 @@ class InvitesCog(commands.Cog):
                     "An HTTP error occurred while fetching invites for guild %s.",
                     guild.name,
                 )
+
+    @commands.Cog.listener()
+    async def on_resumed(self) -> None:
+        """Re-cache invites when the bot resumes a session to prevent stale data."""
+        log.info("Session resumed, re-caching all invites.")
+        await self.recache_all_invites()
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:  # noqa: PLR0912
@@ -92,8 +102,8 @@ class InvitesCog(commands.Cog):
                     )
             return
 
-        # Determine the inviter's ID, defaulting to 0 if not found.
-        inviter_id: InviterId = UserId(inviter.id) if inviter else 0
+        # Determine the inviter's ID, defaulting to None if not found.
+        inviter_id: InviterId = UserId(inviter.id) if inviter else None
 
         # The database insertion and invite tracking now works for all guilds.
         is_new_invite = await self.bot.invites_db.insert_invite(UserId(member.id), inviter_id, GuildId(member.guild.id))
@@ -158,26 +168,24 @@ class InvitesCog(commands.Cog):
     async def invites_top(self, interaction: discord.Interaction) -> None:
         """Display the top 10 inviters in an embed."""
         await interaction.response.defer()
-        mapping = await self.bot.invites_db.get_invites_by_inviter(GuildId(interaction.guild.id))
+        # This new method returns a sorted list of (user_id, invite_count) tuples
+        leaderboard_data = await self.bot.invites_db.get_invite_leaderboard(GuildId(interaction.guild.id))
 
         embed = discord.Embed(title="🏆 Top Invites Leaderboard", color=discord.Color.gold())
 
-        if not mapping:
+        if not leaderboard_data:
             embed.description = "No invites have been tracked yet."
             await interaction.followup.send(embed=embed)
             return
 
-        sorted_inviters = sorted(mapping.items(), key=lambda i: len(i[1]), reverse=True)
-
-        leaderboard_text = ""
+        leaderboard_text = []
         emojis = ["🥇", "🥈", "🥉"]
-        for i, (user_id, invited_list) in enumerate(sorted_inviters[:10]):
-            # Check the type of user_id before creating a mention
+        for i, (user_id, invite_count) in enumerate(leaderboard_data):
             rank = emojis[i] if i < len(emojis) else f"**#{i + 1}**"
-            user_display = f"<@{user_id}>" if user_id != 0 else "Unknown Inviter"
-            leaderboard_text += f"{rank} {user_display} — **{len(invited_list)}** invites\n"
+            user_display = f"<@{user_id}>" if user_id is not None else "Unknown Inviter"
+            leaderboard_text.append(f"{rank} {user_display} — **{invite_count}** invites")
 
-        embed.description = leaderboard_text
+        embed.description = "\n".join(leaderboard_text)
         await interaction.followup.send(embed=embed)
 
     @invites.command(name="mylist", description="Shows who you have invited to the server.")
@@ -185,7 +193,7 @@ class InvitesCog(commands.Cog):
         """Show a list of members invited by the user."""
         await interaction.response.defer(ephemeral=True)
         all_invites = await self.bot.invites_db.get_invites_by_inviter(GuildId(interaction.guild.id))
-        user_invites = all_invites.get(interaction.user.id, [])
+        user_invites = all_invites.get(UserId(interaction.user.id), [])
 
         embed = discord.Embed(title="Your Invited Members", color=discord.Color.purple())
 
@@ -237,7 +245,7 @@ class InvitesCog(commands.Cog):
             if invitee_id in existing_invitees:
                 continue
 
-            if await self.bot.invites_db.insert_invite(invitee_id, UserId(inviter_id), guild_id, joined_at):
+            if await self.bot.invites_db.insert_invite(invitee_id, UserId(int(inviter_id)), guild_id, joined_at):
                 new_imports += 1
 
         await interaction.followup.send(f"Import complete. Added {new_imports} new invite records.")

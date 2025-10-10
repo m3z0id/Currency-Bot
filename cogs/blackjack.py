@@ -142,14 +142,14 @@ class BlackjackView(discord.ui.View):
         """Check if the user can afford an action and deduct the amount."""
         user_id = UserId(interaction.user.id)
         guild_id = GuildId(interaction.guild.id)
-        if (balance := await self.bot.stats_db.get_stat(user_id, guild_id, StatName.CURRENCY)) < amount:
+        if (balance := await self.bot.user_db.get_stat(user_id, guild_id, StatName.CURRENCY)) < amount:
             await interaction.response.send_message(
                 f"You don't have enough credits to {action_name}. You need ${amount:,} but only have ${balance:,}.",
                 ephemeral=True,
             )
             return False
 
-        await self.bot.stats_db.increment_stat(user_id, guild_id, StatName.CURRENCY, -amount)
+        await self.bot.user_db.increment_stat(user_id, guild_id, StatName.CURRENCY, -amount)
         return True
 
     # --- Game Flow & Logic ---
@@ -179,7 +179,7 @@ class BlackjackView(discord.ui.View):
         # --- 2. Process Database Payout ---
         payout = int(bet_amount * config["payout_mult"])
         if payout > 0:
-            await self.bot.stats_db.increment_stat(user_id, guild_id, StatName.CURRENCY, payout)
+            await self.bot.user_db.increment_stat(user_id, guild_id, StatName.CURRENCY, payout)
 
     def _end_game(self) -> None:
         """Determine winner, sets outcome message, and calls for payout/stat updates."""
@@ -401,7 +401,7 @@ class PlayAgainButton(discord.ui.Button["BlackjackView"]):
         view = self.view
         user_id = UserId(interaction.user.id)
         guild_id = GuildId(interaction.guild.id)
-        if (balance := await view.bot.stats_db.get_stat(user_id, guild_id, StatName.CURRENCY)) < self.bet:
+        if (balance := await view.bot.user_db.get_stat(user_id, guild_id, StatName.CURRENCY)) < self.bet:
             await interaction.response.edit_message(
                 content=f"You can't play again. You need ${self.bet:,} but only have ${balance:,}.",
                 embed=None,
@@ -409,7 +409,7 @@ class PlayAgainButton(discord.ui.Button["BlackjackView"]):
             )
             return
 
-        await view.bot.stats_db.increment_stat(user_id, guild_id, StatName.CURRENCY, -self.bet)
+        await view.bot.user_db.increment_stat(user_id, guild_id, StatName.CURRENCY, -self.bet)
         new_view = BlackjackView(view.bot, interaction.user, self.bet)
         await interaction.response.edit_message(
             embed=new_view.create_embed(),
@@ -470,14 +470,14 @@ class BlackjackCog(commands.Cog):
     async def blackjack(self, ctx: commands.Context, bet: commands.Range[int, 1]) -> None:  # ty: ignore [invalid-type-form]
         user_id = UserId(ctx.author.id)
         guild_id = GuildId(ctx.guild.id)
-        if (balance := await self.bot.stats_db.get_stat(user_id, guild_id, StatName.CURRENCY)) < bet:
+        if (balance := await self.bot.user_db.get_stat(user_id, guild_id, StatName.CURRENCY)) < bet:
             await ctx.send(
                 f"Insufficient funds! You tried to bet ${bet:,} but only have ${balance:,}.",
                 ephemeral=True,
             )
             return
 
-        await self.bot.stats_db.increment_stat(user_id, guild_id, StatName.CURRENCY, -bet)
+        await self.bot.user_db.increment_stat(user_id, guild_id, StatName.CURRENCY, -bet)
         view = BlackjackView(self.bot, ctx.author, bet)
         await ctx.send(embed=view.create_embed(), view=view, ephemeral=False)
 

@@ -11,8 +11,8 @@ from discord.ext.commands import ExtensionAlreadyLoaded, ExtensionFailed, Extens
 from modules.config import BotConfig
 from modules.Database import Database
 from modules.InvitesDB import InvitesDB
-from modules.StatsDB import StatsDB
 from modules.TaskDB import TaskDB
+from modules.TransactionsDB import TransactionsDB
 from modules.UserDB import UserDB
 
 log = logging.getLogger(__name__)
@@ -41,13 +41,13 @@ class KiwiBot(commands.Bot):
 
         # Initialize the database first
         self.database: Database = Database()
-        self.stats_db = StatsDB(self.database)
         self.user_db = UserDB(self.database)
         self.task_db = TaskDB(self.database)
         self.invites_db = InvitesDB(self.database)
+        self.transactions_db = TransactionsDB(self.database)
 
         # AWAIT the post-initialization tasks to ensure tables are created
-        await self.stats_db.post_init()
+        # UserDB must be first as other tables have foreign keys to it.
         await self.user_db.post_init()
         await self.task_db.post_init()
         await self.invites_db.post_init()
@@ -113,3 +113,11 @@ class KiwiBot(commands.Bot):
         except Exception:
             log.exception("Unhandled command error in '%s'", ctx.command)
             await ctx.send("An unexpected error occurred.", ephemeral=True)
+
+    async def close(self) -> None:
+        """Gracefully close bot resources."""
+        # aiosqlite connections are managed by context managers,
+        # so no explicit database closing is needed here.
+        # This is a good place for other cleanup logic in the future.
+        log.info("Closing bot gracefully.")
+        await super().close()

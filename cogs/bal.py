@@ -26,8 +26,8 @@ class Bal(commands.Cog):
         user_id = UserId(target_member.id)
         guild_id = GuildId(ctx.guild.id)
 
-        currency_balance = await self.bot.stats_db.get_stat(user_id, guild_id, StatName.CURRENCY)
-        bump_count = await self.bot.stats_db.get_stat(user_id, guild_id, StatName.BUMPS)
+        currency_balance = await self.bot.user_db.get_stat(user_id, guild_id, StatName.CURRENCY)
+        bump_count = await self.bot.user_db.get_stat(user_id, guild_id, StatName.BUMPS)
         description = f"{target_member.mention}\nWallet: ${currency_balance:,}"
         if bump_count > 0:
             description += f"\nBumps: {bump_count}"

@@ -87,8 +87,8 @@ class BumpHandlerCog(commands.Cog):
                 user_id = UserId(bumper.id)
                 guild_id = GuildId(message.guild.id)
                 # Reward Currency
-                await self.bot.stats_db.increment_stat(user_id, guild_id, StatName.CURRENCY, reward)
-                new_bump_count = await self.bot.stats_db.increment_stat(user_id, guild_id, StatName.BUMPS, 1)
+                await self.bot.user_db.increment_stat(user_id, guild_id, StatName.CURRENCY, reward)
+                new_bump_count = await self.bot.user_db.increment_stat(user_id, guild_id, StatName.BUMPS, 1)
                 log.info("Rewarded %s with $%d for bumping.", bumper.display_name, reward)
                 await channel.send(
                     f"🎉 Thanks for your **{new_bump_count:,}th** bump, {bumper.mention}! You've received **${reward}**.",

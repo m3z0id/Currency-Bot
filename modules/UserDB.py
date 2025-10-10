@@ -1,7 +1,23 @@
-from typing import ClassVar, override
+"""Manages user-specific data and preferences in the database.
 
-from modules.Database import Database
-from modules.types import GuildId, ReminderPreference, UserGuildPair, UserId
+This module handles the `users` table, which is the single source of truth for
+all user-specific data, including stats (currency, bumps, XP), preferences
+(reminders, opt-outs), and state (daily claims, activity). The schema is defined
+with strict constraints and generated columns to enforce business logic and data
+integrity directly at the database level.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING, ClassVar, override
+
+from modules.enums import StatName
+from modules.types import GuildId, NonNegativeInt, PositiveInt, ReminderPreference, UserGuildPair, UserId
+
+if TYPE_CHECKING:
+    from modules.Database import Database
+    from modules.TransactionsDB import TransactionsDB
 
 
 # False S608: CURRENCY_TABLE is a constant, not user input
@@ -10,6 +26,7 @@ class UserDB:
 
     def __init__(self, database: Database) -> None:
         self.database = database
+        self.log = logging.getLogger(__name__)
 
     @override
     async def post_init(self) -> None:
@@ -18,14 +35,62 @@ class UserDB:
             await conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {self.USERS_TABLE} (
-                    discord_id INTEGER NOT NULL,
-                    guild_id INTEGER NOT NULL,
-                    last_active_timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
-                    daily_reminder_preference TEXT NOT NULL DEFAULT 'NEVER',
-                    has_claimed_daily INTEGER NOT NULL DEFAULT 0,
-                    leveling_opt_out INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (discord_id, guild_id)
-                )
+                    -- Core Identity
+                    discord_id                  INTEGER NOT NULL CHECK(discord_id > 1000000),
+                    guild_id                    INTEGER NOT NULL CHECK(guild_id > 1000000),
+
+                    -- Stats (from former user_stats table)
+                    currency                    INTEGER NOT NULL DEFAULT 0 CHECK(currency >= 0),
+                    bumps                       INTEGER NOT NULL DEFAULT 0 CHECK(bumps >= 0),
+                    xp                          INTEGER NOT NULL DEFAULT 0 CHECK(xp >= 0),
+
+                    -- Generated Level Column
+                    level                       INTEGER GENERATED ALWAYS AS (CAST(floor(pow(max(xp - 6, 0), 1.0/2.5)) AS INTEGER)) STORED,
+
+                    -- Preferences & State
+                    last_active_timestamp       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+                    daily_reminder_preference   TEXT NOT NULL DEFAULT 'NEVER' CHECK(daily_reminder_preference IN ('NEVER', 'ONCE', 'ALWAYS')),
+                    has_claimed_daily           INTEGER NOT NULL DEFAULT 0 CHECK(has_claimed_daily IN (0, 1)),
+                    leveling_opt_out            INTEGER NOT NULL DEFAULT 0 CHECK(leveling_opt_out IN (0, 1)),
+
+                    -- Keys & Constraints
+                    PRIMARY KEY (discord_id, guild_id),
+
+                    -- Invariant: 'ONCE' preference is only for users who haven't claimed.
+                    CHECK(NOT (daily_reminder_preference = 'ONCE' AND has_claimed_daily = 1))
+                ) STRICT;
+                """,
+            )
+            # Add an index for guild_id and last_active_timestamp to speed up activity queries.
+            await conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_users_activity ON {self.USERS_TABLE}(guild_id, last_active_timestamp);
+                """,
+            )
+            # Invariant: Bumps are append-only.
+            await conn.execute(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS prevent_bump_decrement
+                BEFORE UPDATE ON {self.USERS_TABLE}
+                WHEN NEW.bumps < OLD.bumps
+                BEGIN
+                    SELECT RAISE(ABORT, 'Bump count cannot be decreased');
+                END;
+                """,
+            )
+            # Create a view for user stats to abstract the underlying table.
+            await conn.execute(
+                """
+                CREATE VIEW IF NOT EXISTS v_user_stats AS
+                SELECT
+                    discord_id,
+                    guild_id,
+                    currency,
+                    bumps,
+                    xp,
+                    level,
+                    leveling_opt_out
+                FROM users;
                 """,
             )
             await conn.commit()
@@ -162,8 +227,10 @@ class UserDB:
             await conn.commit()
             return cursor.rowcount == 1
 
-    async def process_daily_reset(self, guild_id: GuildId) -> list[UserId]:
+    async def process_daily_reset_for_guild(self, guild_id: GuildId) -> list[UserId]:
         """Atomically reset all daily claims and fetch users who need a reminder.
+
+        This is currently dead code but remains separate to leave room for different timezones per server.
 
         This single transaction performs three actions:
         1. Fetches all users who have not claimed their daily and have reminders enabled.
@@ -198,5 +265,171 @@ class UserDB:
                 """,  # noqa: S608
                 (guild_id,),
             )
+            # Create a partial index to optimize fetching users who need a daily reminder.
+            await conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_users_pending_reminders
+                ON users(guild_id)
+                WHERE daily_reminder_preference IN ('ALWAYS', 'ONCE');
+                """,
+            )
             await conn.commit()
             return user_ids_to_remind
+
+    async def process_daily_reset_all(self) -> list[UserId]:
+        """Atomically reset all daily claims across all guilds and fetch users who need a reminder.
+
+        This single transaction performs three actions for the entire database:
+        1. Fetches all users who have not claimed their daily and have reminders enabled.
+        2. Resets `has_claimed_daily` to 0 for ALL users.
+        3. Resets `daily_reminder_preference` to 'NEVER' for users who had it set to 'ONCE'.
+
+        Returns
+        -------
+            A list of user IDs to be reminded.
+
+        """
+        async with self.database.get_conn() as conn:
+            # 1. Fetch all users who need a reminder from any guild.
+            cursor = await conn.execute(
+                f"""
+                SELECT DISTINCT discord_id FROM {self.USERS_TABLE}
+                WHERE daily_reminder_preference IN ('ALWAYS', 'ONCE')
+                """,  # noqa: S608
+            )
+            user_ids_to_remind = [UserId(row[0]) for row in await cursor.fetchall()]
+
+            # 2. Atomically reset daily claims and 'ONCE' preferences for all users.
+            await conn.execute(
+                f"""
+                UPDATE {self.USERS_TABLE} SET
+                    has_claimed_daily = 0,
+                    daily_reminder_preference = CASE
+                        WHEN daily_reminder_preference = 'ONCE' THEN 'NEVER'
+                        ELSE daily_reminder_preference END
+                """,  # noqa: S608
+            )
+            await conn.commit()
+            return user_ids_to_remind
+
+    # --- Stat Methods (Migrated from StatsDB) ---
+
+    async def get_stat(self, user_id: UserId, guild_id: GuildId, stat: StatName) -> NonNegativeInt:
+        """Gets a single stat for a user, returning 0 if they don't exist."""
+        async with self.database.get_cursor() as cursor:
+            # The stat name is from an enum, so it's safe to use in an f-string.
+            await cursor.execute(
+                f"SELECT {stat.value} FROM {self.USERS_TABLE} WHERE discord_id = ? AND guild_id = ?",  # noqa: S608
+                (user_id, guild_id),
+            )
+            result = await cursor.fetchone()
+        return NonNegativeInt(int(result[0])) if result else NonNegativeInt(0)
+
+    async def increment_stat(self, user_id: UserId, guild_id: GuildId, stat: StatName, amount: int) -> int:
+        """Atomically increments a user's stat and returns the new value."""
+        # stat.value is 'currency', 'bumps', or 'xp' which we safely use to build the query
+        sql = f"""
+            INSERT INTO {self.USERS_TABLE} (discord_id, guild_id, {stat.value})
+            VALUES (?, ?, ?)
+            ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                {stat.value} = {stat.value} + excluded.{stat.value}
+            RETURNING {stat.value}
+        """
+        async with self.database.get_conn() as conn:
+            cursor = await conn.execute(sql, (user_id, guild_id, amount))
+            new_value_row = await cursor.fetchone()
+            await conn.commit()
+        return int(new_value_row[0]) if new_value_row else 0
+
+    async def set_stat(self, user_id: UserId, guild_id: GuildId, stat: StatName, value: int) -> None:
+        """Atomically sets a user's stat to a specific value."""
+        sql = f"""
+            INSERT INTO {self.USERS_TABLE} (discord_id, guild_id, {stat.value})
+            VALUES (?, ?, ?)
+            ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                {stat.value} = excluded.{stat.value}
+        """
+        async with self.database.get_conn() as conn:
+            await conn.execute(sql, (user_id, guild_id, value))
+            await conn.commit()
+
+    async def transfer_currency(
+        self,
+        sender_id: UserId,
+        receiver_id: UserId,
+        guild_id: GuildId,
+        amount: PositiveInt,
+        transactions_db: TransactionsDB,
+    ) -> bool:
+        """Atomically transfers currency and logs the transaction."""
+        async with self.database.get_conn() as conn:
+            try:
+                # 1. Check sender's balance and decrement in one atomic step
+                cursor = await conn.execute(
+                    f"UPDATE {self.USERS_TABLE} SET currency = currency - ? WHERE discord_id = ? AND guild_id = ? AND currency >= ?",
+                    (amount, sender_id, guild_id, amount),
+                )
+                if cursor.rowcount == 0:
+                    return False  # Insufficient funds or user not found
+
+                # 2. Increment receiver's balance (UPSERT to be safe)
+                await conn.execute(
+                    f"""
+                    INSERT INTO {self.USERS_TABLE} (discord_id, guild_id, currency) VALUES (?, ?, ?)
+                    ON CONFLICT(discord_id, guild_id) DO UPDATE SET currency = currency + excluded.currency
+                    """,
+                    (receiver_id, guild_id, amount),
+                )
+
+                # 3. Log the transaction to the new table
+                await conn.execute(
+                    f"INSERT INTO {transactions_db.TRANSACTIONS_TABLE} (sender_id, receiver_id, guild_id, stat_name, amount) VALUES (?, ?, ?, ?, ?)",
+                    (sender_id, receiver_id, guild_id, StatName.CURRENCY.value, amount),
+                )
+
+                await conn.commit()
+                return True
+            except Exception:
+                await conn.rollback()
+                self.log.exception(
+                    "Currency transfer failed and was rolled back. From %s to %s, amount %d",
+                    sender_id,
+                    receiver_id,
+                    amount,
+                )
+                return False
+
+    async def get_leaderboard(
+        self,
+        guild_id: GuildId,
+        stat: StatName,
+        limit: int = 10,
+    ) -> list[tuple[int, UserId, int]]:
+        """Retrieve the top users by a stat."""
+        query_stat = "xp" if stat == StatName.XP else stat.value
+        where_clause = "WHERE guild_id = ? AND leveling_opt_out = 0" if stat == StatName.XP else "WHERE guild_id = ?"
+
+        async with self.database.get_cursor() as cursor:
+            await cursor.execute(
+                f"""
+                SELECT
+                    RANK() OVER (ORDER BY {query_stat} DESC) as rank,
+                    discord_id,
+                    {query_stat}
+                FROM v_user_stats
+                {where_clause}
+                LIMIT ?
+                """,  # noqa: S608
+                (guild_id, limit),
+            )
+            rows = await cursor.fetchall()
+            return [(row[0], UserId(row[1]), row[2]) for row in rows]
+
+    async def get_level_and_xp(self, user_id: UserId, guild_id: GuildId) -> tuple[int, int] | None:
+        """Fetch the level and XP for a user."""
+        async with self.database.get_cursor() as cursor:
+            await cursor.execute(
+                f"SELECT level, xp FROM {self.USERS_TABLE} WHERE discord_id = ? AND guild_id = ?",
+                (user_id, guild_id),
+            )
+            return await cursor.fetchone()

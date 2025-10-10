@@ -22,7 +22,7 @@ class TaskDB:
                 CREATE TABLE IF NOT EXISTS {self.TASKS_TABLE} (
                     task_type TEXT PRIMARY KEY,
                     due_timestamp INTEGER NOT NULL
-                );
+                ) STRICT;
                 """,
             )
             await conn.commit()
@@ -32,9 +32,10 @@ class TaskDB:
         async with self.database.get_conn() as conn:
             await conn.execute(
                 f"""
-                INSERT OR REPLACE INTO {self.TASKS_TABLE} (task_type, due_timestamp)
+                INSERT INTO {self.TASKS_TABLE} (task_type, due_timestamp)
                 VALUES (?, ?)
-                """,  # noqa: S608
+                ON CONFLICT(task_type) DO UPDATE SET due_timestamp = excluded.due_timestamp
+                """,
                 (task_type, int(due_timestamp)),
             )
             await conn.commit()

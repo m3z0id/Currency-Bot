@@ -62,7 +62,7 @@ class Sell(commands.Cog):
         random_num = random.randint(1, 20)
         guild_id = GuildId(ctx.guild.id)
         user_id = UserId(ctx.author.id)
-        await self.bot.stats_db.increment_stat(
+        await self.bot.user_db.increment_stat(
             user_id,
             guild_id,
             StatName.CURRENCY,
