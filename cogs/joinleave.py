@@ -24,9 +24,11 @@ class JoinLeaveLogCog(commands.Cog):
     async def cog_load(self) -> None:
         """Fetch the channel object when the cog is loaded."""
         # Only attempt to fetch the channel if we are in the privileged guild context
-        if not self.bot.get_guild(self.privileged_guild_id):
+        guild = await self.bot.fetch_guild(self.privileged_guild_id)
+        if not guild:
             return
-        channel = self.bot.get_channel(self.channel_id)
+
+        channel = await self.bot.fetch_channel(self.channel_id)
         if isinstance(channel, discord.TextChannel):
             self.log_channel = channel
             log.info("Join/Leave logging channel set to #%s", self.log_channel.name)
