@@ -35,7 +35,7 @@ class TaskDB:
                 INSERT INTO {self.TASKS_TABLE} (task_type, due_timestamp)
                 VALUES (?, ?)
                 ON CONFLICT(task_type) DO UPDATE SET due_timestamp = excluded.due_timestamp
-                """,
+                """,  # noqa: S608
                 (task_type, int(due_timestamp)),
             )
             await conn.commit()

@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from modules.enums import StatName
-from modules.types import GuildId, UserId
+from modules.types import GuildId, PositiveInt, UserId
 
 if TYPE_CHECKING:
     from discord import Interaction
@@ -149,8 +149,10 @@ class BlackjackView(discord.ui.View):
             )
             return False
 
-        await self.bot.user_db.increment_stat(user_id, guild_id, StatName.CURRENCY, -amount)
-        return True
+        # This now returns None on failure (insufficient funds), so we check that.
+        # The check is technically redundant because get_stat already checked,
+        # but it's the correct pattern for using the new atomic method.
+        return await self.bot.user_db.decrement_stat(user_id, guild_id, StatName.CURRENCY, PositiveInt(amount)) is not None
 
     # --- Game Flow & Logic ---
     async def _resolve_payout_and_stats(
@@ -409,7 +411,7 @@ class PlayAgainButton(discord.ui.Button["BlackjackView"]):
             )
             return
 
-        await view.bot.user_db.increment_stat(user_id, guild_id, StatName.CURRENCY, -self.bet)
+        await view.bot.user_db.decrement_stat(user_id, guild_id, StatName.CURRENCY, PositiveInt(self.bet))
         new_view = BlackjackView(view.bot, interaction.user, self.bet)
         await interaction.response.edit_message(
             embed=new_view.create_embed(),
@@ -477,7 +479,7 @@ class BlackjackCog(commands.Cog):
             )
             return
 
-        await self.bot.user_db.increment_stat(user_id, guild_id, StatName.CURRENCY, -bet)
+        await self.bot.user_db.decrement_stat(user_id, guild_id, StatName.CURRENCY, PositiveInt(bet))
         view = BlackjackView(self.bot, ctx.author, bet)
         await ctx.send(embed=view.create_embed(), view=view, ephemeral=False)
 

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from modules.TransactionsDB import TransactionsDB
 
 
-# False S608: CURRENCY_TABLE is a constant, not user input
+# False S608: CURRENCY_TABLE is a constant, not user input. And stat.value is enum.
 class UserDB:
     USERS_TABLE: ClassVar[str] = "users"
 
@@ -45,11 +45,14 @@ class UserDB:
                     xp                          INTEGER NOT NULL DEFAULT 0 CHECK(xp >= 0),
 
                     -- Generated Level Column
-                    level                       INTEGER GENERATED ALWAYS AS (CAST(floor(pow(max(xp - 6, 0), 1.0/2.5)) AS INTEGER)) STORED,
+                    level                       INTEGER GENERATED ALWAYS AS (CAST(floor(pow(max(xp - 6, 0), 1.0/2.5)) AS INTEGER))
+                    STORED,
 
                     -- Preferences & State
                     last_active_timestamp       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
-                    daily_reminder_preference   TEXT NOT NULL DEFAULT 'NEVER' CHECK(daily_reminder_preference IN ('NEVER', 'ONCE', 'ALWAYS')),
+                    daily_reminder_preference   TEXT NOT NULL DEFAULT 'NEVER'
+                    CHECK(daily_reminder_preference IN ('NEVER', 'ONCE', 'ALWAYS')),
+
                     has_claimed_daily           INTEGER NOT NULL DEFAULT 0 CHECK(has_claimed_daily IN (0, 1)),
                     leveling_opt_out            INTEGER NOT NULL DEFAULT 0 CHECK(leveling_opt_out IN (0, 1)),
 
@@ -315,7 +318,7 @@ class UserDB:
     # --- Stat Methods (Migrated from StatsDB) ---
 
     async def get_stat(self, user_id: UserId, guild_id: GuildId, stat: StatName) -> NonNegativeInt:
-        """Gets a single stat for a user, returning 0 if they don't exist."""
+        """Get a single stat for a user, returning 0 if they don't exist."""
         async with self.database.get_cursor() as cursor:
             # The stat name is from an enum, so it's safe to use in an f-string.
             await cursor.execute(
@@ -325,8 +328,8 @@ class UserDB:
             result = await cursor.fetchone()
         return NonNegativeInt(int(result[0])) if result else NonNegativeInt(0)
 
-    async def increment_stat(self, user_id: UserId, guild_id: GuildId, stat: StatName, amount: int) -> int:
-        """Atomically increments a user's stat and returns the new value."""
+    async def increment_stat(self, user_id: UserId, guild_id: GuildId, stat: StatName, amount: PositiveInt) -> int:
+        """Atomically increments a user's stat using a positive value and returns the new value."""
         # stat.value is 'currency', 'bumps', or 'xp' which we safely use to build the query
         sql = f"""
             INSERT INTO {self.USERS_TABLE} (discord_id, guild_id, {stat.value})
@@ -334,12 +337,33 @@ class UserDB:
             ON CONFLICT(discord_id, guild_id) DO UPDATE SET
                 {stat.value} = {stat.value} + excluded.{stat.value}
             RETURNING {stat.value}
-        """
+        """  # noqa: S608
         async with self.database.get_conn() as conn:
             cursor = await conn.execute(sql, (user_id, guild_id, amount))
             new_value_row = await cursor.fetchone()
             await conn.commit()
         return int(new_value_row[0]) if new_value_row else 0
+
+    async def decrement_stat(
+        self,
+        user_id: UserId,
+        guild_id: GuildId,
+        stat: StatName,
+        amount: PositiveInt,
+    ) -> int | None:
+        """Atomically decrements a user's stat if they have sufficient value."""
+        # This new method uses a safe UPDATE instead of an UPSERT
+        sql = f"""
+            UPDATE {self.USERS_TABLE}
+            SET {stat.value} = {stat.value} - ?
+            WHERE discord_id = ? AND guild_id = ? AND {stat.value} >= ?
+            RETURNING {stat.value}
+        """  # noqa: S608
+        async with self.database.get_conn() as conn:
+            cursor = await conn.execute(sql, (amount, user_id, guild_id, amount))
+            new_value_row = await cursor.fetchone()
+            await conn.commit()
+        return int(new_value_row[0]) if new_value_row else None
 
     async def set_stat(self, user_id: UserId, guild_id: GuildId, stat: StatName, value: int) -> None:
         """Atomically sets a user's stat to a specific value."""
@@ -348,7 +372,7 @@ class UserDB:
             VALUES (?, ?, ?)
             ON CONFLICT(discord_id, guild_id) DO UPDATE SET
                 {stat.value} = excluded.{stat.value}
-        """
+        """  # noqa: S608
         async with self.database.get_conn() as conn:
             await conn.execute(sql, (user_id, guild_id, value))
             await conn.commit()
@@ -366,7 +390,8 @@ class UserDB:
             try:
                 # 1. Check sender's balance and decrement in one atomic step
                 cursor = await conn.execute(
-                    f"UPDATE {self.USERS_TABLE} SET currency = currency - ? WHERE discord_id = ? AND guild_id = ? AND currency >= ?",
+                    f"""UPDATE {self.USERS_TABLE} SET currency = currency - ?
+                    WHERE discord_id = ? AND guild_id = ? AND currency >= ?""",  # noqa: S608
                     (amount, sender_id, guild_id, amount),
                 )
                 if cursor.rowcount == 0:
@@ -377,18 +402,18 @@ class UserDB:
                     f"""
                     INSERT INTO {self.USERS_TABLE} (discord_id, guild_id, currency) VALUES (?, ?, ?)
                     ON CONFLICT(discord_id, guild_id) DO UPDATE SET currency = currency + excluded.currency
-                    """,
+                    """,  # noqa: S608
                     (receiver_id, guild_id, amount),
                 )
 
                 # 3. Log the transaction to the new table
                 await conn.execute(
-                    f"INSERT INTO {transactions_db.TRANSACTIONS_TABLE} (sender_id, receiver_id, guild_id, stat_name, amount) VALUES (?, ?, ?, ?, ?)",
+                    f"""INSERT INTO {transactions_db.TRANSACTIONS_TABLE} (sender_id, receiver_id, guild_id, stat_name, amount)
+                    VALUES (?, ?, ?, ?, ?)""",  # noqa: S608
                     (sender_id, receiver_id, guild_id, StatName.CURRENCY.value, amount),
                 )
 
                 await conn.commit()
-                return True
             except Exception:
                 await conn.rollback()
                 self.log.exception(
@@ -398,6 +423,8 @@ class UserDB:
                     amount,
                 )
                 return False
+            else:
+                return True
 
     async def get_leaderboard(
         self,
@@ -429,7 +456,7 @@ class UserDB:
         """Fetch the level and XP for a user."""
         async with self.database.get_cursor() as cursor:
             await cursor.execute(
-                f"SELECT level, xp FROM {self.USERS_TABLE} WHERE discord_id = ? AND guild_id = ?",
+                f"SELECT level, xp FROM {self.USERS_TABLE} WHERE discord_id = ? AND guild_id = ?",  # noqa: S608
                 (user_id, guild_id),
             )
             return await cursor.fetchone()
