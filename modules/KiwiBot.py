@@ -1,6 +1,6 @@
 import logging
 import pathlib
-from typing import ClassVar
+from typing import ClassVar, Final
 
 import discord
 from discord import Forbidden, HTTPException, MissingApplicationID
@@ -9,6 +9,7 @@ from discord.ext import commands
 from discord.ext.commands import ExtensionAlreadyLoaded, ExtensionFailed, ExtensionNotFound, NoEntryPointError
 
 from modules.config import BotConfig
+from modules.ConfigDB import ConfigDB
 from modules.Database import Database
 from modules.InvitesDB import InvitesDB
 from modules.TaskDB import TaskDB
@@ -45,12 +46,15 @@ class KiwiBot(commands.Bot):
         self.task_db = TaskDB(self.database)
         self.invites_db = InvitesDB(self.database)
         self.transactions_db = TransactionsDB(self.database)
+        self.config_db = ConfigDB(self.database)
 
         # AWAIT the post-initialization tasks to ensure tables are created
         # UserDB must be first as other tables have foreign keys to it.
         await self.user_db.post_init()
         await self.task_db.post_init()
         await self.invites_db.post_init()
+        await self.transactions_db.post_init()
+        await self.config_db.post_init()
         log.info("All database tables initialized.")
 
         # Now it's safe to load cogs
@@ -75,7 +79,44 @@ class KiwiBot(commands.Bot):
         ):
             log.exception("Error syncing commands")
 
+        if self.config.swl_guild_id:
+            SWL_GUILD: Final[discord.Object] = discord.Object(self.config.swl_guild_id)
+            synced_guild = await self.tree.sync(guild=SWL_GUILD)
+            if synced_guild:
+                log.info(
+                    "Synced %d command(s) for guild %d: %s",
+                    len(synced_guild),
+                    self.config.swl_guild_id,
+                    [i.name for i in synced_guild],
+                )
+
         log.info("Setup complete.")
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        """Send a welcome and setup guide when joining a new guild."""
+        log.info("Joined new guild: %s (%s)", guild.name, guild.id)
+
+        # Try to send a message to the system channel, which is usually the best bet.
+        # Fallback to the first available text channel if the system channel isn't usable.
+        target_channel = guild.system_channel
+        if not target_channel or not target_channel.permissions_for(guild.me).send_messages:
+            for channel in guild.text_channels:
+                if channel.permissions_for(guild.me).send_messages:
+                    target_channel = channel
+                    break
+
+        if target_channel:
+            embed = discord.Embed(
+                title="👋 Quick Setup!",
+                description="Admins use the `/config autodiscover` command. I'll suggest settings for you to approve.",
+                color=discord.Colour.green(),
+            )
+            await target_channel.send(embed=embed)
+
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        """Handle data cleanup when the bot is removed from a guild."""
+        log.info("Bot removed from guild: %s (%s). Cleaning up data.", guild.name, guild.id)
+        await self.config_db.on_guild_remove(guild.id)
 
     async def on_error(
         self,

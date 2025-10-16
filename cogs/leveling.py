@@ -12,7 +12,7 @@ from modules.enums import StatName
 
 # Import the refactored logic and helpers
 from modules.leveling_utils import LevelBotProtocol, get_level, to_next_level
-from modules.types import ChannelId, GuildId, NonNegativeInt, UserId
+from modules.types import GuildId, NonNegativeInt, UserId
 
 if TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
@@ -95,17 +95,15 @@ class LevelingCog(commands.Cog):
 
     def __init__(
         self,
-        bot: "KiwiBot",
-        level_up_channel_id: ChannelId | None,
-        guild_id: GuildId | None,
-        udp_port: int | None,  # This is a port number, not an ID, so int is correct.
+        bot: "KiwiBot",  # Removed level_up_channel_id and guild_id from init
+        udp_port: int | None,
+        privileged_guild_id: GuildId,  # Special case for UDP, keep this global guild ID
     ) -> None:
         self.bot = bot
         self.last_activity_timestamps: dict[tuple[int, int], float] = {}
         self.udp_transport: asyncio.DatagramTransport | None = None
-        self.level_up_channel_id = level_up_channel_id
-        self.guild_id = guild_id
         self.udp_port = udp_port
+        self.privileged_guild_id = privileged_guild_id  # For UDP special case
 
     async def cog_load(self) -> None:
         """Start the UDP server when the cog is loaded."""
@@ -151,22 +149,27 @@ class LevelingCog(commands.Cog):
         source: str,
     ) -> None:
         """Format and send a level-up announcement to the configured channel."""
+        config = await self.bot.config_db.get_guild_config(guild_id)
+        level_up_channel_id = config.level_up_channel_id
+
         guild = self.bot.get_guild(guild_id)
         if not guild:
             return
 
         channel = None
-        # 1. Prioritize the configured channel ID for the privileged guild
-        if guild.id == self.guild_id and self.level_up_channel_id:
-            channel = guild.get_channel(self.level_up_channel_id)
+        if level_up_channel_id:
+            channel = guild.get_channel(level_up_channel_id)
 
         # 2. If no channel yet, fall back to searching by name in any guild
         if not channel:
             channel = discord.utils.find(lambda c: "level" in c.name.lower(), guild.text_channels)
 
         if not isinstance(channel, discord.TextChannel):
-            if not (guild.id == self.guild_id and self.level_up_channel_id):
-                log.debug("No level-up announcement channel found in guild %s.", guild.name)
+            if not level_up_channel_id:
+                log.debug(
+                    "No level-up announcement channel configured or found in guild %s.",
+                    guild.name,
+                )
             return
         user = self.bot.get_user(user_id)
         if not user:
@@ -192,7 +195,7 @@ class LevelingCog(commands.Cog):
         new_xp = await self.bot.user_db.increment_stat(UserId(user_id), GuildId(guild_id), StatName.XP, amount)
 
         # Safely derive the old XP from the result
-        old_xp = new_xp - amount
+        old_xp = NonNegativeInt(new_xp - amount)
 
         old_level = get_level(old_xp)
         new_level = get_level(new_xp)
@@ -214,22 +217,27 @@ class LevelingCog(commands.Cog):
 
         xp_to_add = self._get_addable_xp(UserId(message.author.id), GuildId(message.guild.id))
         if xp_to_add > 0:
-            await self._grant_xp(UserId(message.author.id), GuildId(message.guild.id), "message", xp_to_add)
+            await self._grant_xp(
+                UserId(message.author.id),
+                GuildId(message.guild.id),
+                "message",
+                xp_to_add,
+            )
 
     async def grant_udp_xp(self, user_id: UserId) -> None:
-        """Handle UDP-based XP for GUILD_ID."""
-        if not self.guild_id:
-            log.warning("Cannot grant UDP XP: GUILD_ID environment variable is not set.")
+        """Handle UDP-based XP for one specific guild."""
+        if not self.privileged_guild_id:
+            log.warning("Cannot grant UDP XP: UDP_GUILD_ID environment variable is not set.")
             return
 
-        guild = self.bot.get_guild(self.guild_id)
+        guild = self.bot.get_guild(self.privileged_guild_id)
         if not guild or not guild.get_member(user_id):
             # Don't grant XP if the user isn't in the specified server
             return
 
-        xp_to_add = self._get_addable_xp(UserId(user_id), self.guild_id)
+        xp_to_add = self._get_addable_xp(UserId(user_id), self.privileged_guild_id)
         if xp_to_add > 0:
-            await self._grant_xp(UserId(user_id), self.guild_id, "udp", xp_to_add)
+            await self._grant_xp(UserId(user_id), self.privileged_guild_id, "udp", xp_to_add)
 
     @level.command(name="opt-out", description="Exclude yourself from the leveling system.")
     async def level_opt_out(self, interaction: discord.Interaction) -> None:
@@ -368,9 +376,8 @@ async def setup(bot: "KiwiBot") -> None:
     """Add the LevelingCog to the bot."""
     await bot.add_cog(
         LevelingCog(
-            bot,
-            level_up_channel_id=bot.config.level_up_channel_id,
-            guild_id=bot.config.guild_id,
-            udp_port=bot.config.udp_port,
+            bot=bot,
+            udp_port=bot.config.udp_port,  # UDP port is a global bot setting
+            privileged_guild_id=bot.config.guild_id,  # Special case for UDP, still uses global guild_id
         ),
     )

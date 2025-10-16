@@ -1,10 +1,14 @@
 import datetime
 import logging
+from typing import TYPE_CHECKING
 
 import discord
 from discord.ext import commands, tasks
 
 from modules.KiwiBot import KiwiBot
+
+if TYPE_CHECKING:
+    from modules.ConfigDB import GuildConfig
 
 # Set up logging for this cog
 log = logging.getLogger(__name__)
@@ -13,15 +17,8 @@ log = logging.getLogger(__name__)
 class RolePrunerCog(commands.Cog):
     """A cog that automatically prunes old roles with a specific prefix."""
 
-    def __init__(
-        self,
-        bot: KiwiBot,
-        role_prefix: str,
-        prune_after_days: int,
-    ) -> None:
+    def __init__(self, bot: KiwiBot) -> None:
         self.bot = bot
-        self.role_prefix = role_prefix
-        self.prune_after_days = prune_after_days
         # Start the pruning loop as soon as the cog is loaded
         self.prune_roles_loop.start()
 
@@ -35,17 +32,26 @@ class RolePrunerCog(commands.Cog):
         log.info("Starting daily check for old custom roles to prune.")
 
         # Calculate the cutoff date for roles to be considered old
-        cutoff_date = discord.utils.utcnow() - datetime.timedelta(days=self.prune_after_days)
 
         # Iterate over all the guilds the bot is in
         for guild in self.bot.guilds:
             log.info("Checking roles in guild: %s", guild.name)
 
+            config: GuildConfig = await self.bot.config_db.get_guild_config(guild.id)
+            custom_role_prefix = config.custom_role_prefix
+            custom_role_prune_days = config.custom_role_prune_days
+
+            if not custom_role_prefix or not custom_role_prune_days or custom_role_prune_days <= 0:
+                log.debug("Skipping custom role prune for guild '%s': Feature not configured or invalid.", guild.name)
+                continue
+
+            cutoff_date = discord.utils.utcnow() - datetime.timedelta(days=custom_role_prune_days)
+
             # Find all roles that meet the pruning criteria
             roles_to_prune = [
                 role
                 for role in guild.roles
-                if not role.managed and role.name.startswith(self.role_prefix) and role.created_at < cutoff_date
+                if not role.managed and role.name.startswith(custom_role_prefix) and role.created_at < cutoff_date
             ]
 
             if not roles_to_prune:
@@ -57,7 +63,7 @@ class RolePrunerCog(commands.Cog):
             # Prune the identified roles
             for role in roles_to_prune:
                 try:
-                    await role.delete(reason=f"Pruning old role created more than {self.prune_after_days} days ago.")
+                    await role.delete(reason=f"Pruning old role created more than {custom_role_prune_days} days ago.")
                     log.info("Successfully pruned role '%s' from %s.", role.name, guild.name)
                 except discord.Forbidden:
                     log.exception(
@@ -77,10 +83,5 @@ class RolePrunerCog(commands.Cog):
 
 async def setup(bot: KiwiBot) -> None:
     """Add the cog to the bot."""
-    await bot.add_cog(
-        RolePrunerCog(
-            bot,
-            role_prefix=bot.config.custom_role_prefix,
-            prune_after_days=bot.config.custom_role_prune_days,
-        ),
-    )
+    # RolePrunerCog is now stateless and will fetch config per guild.
+    await bot.add_cog(RolePrunerCog(bot))

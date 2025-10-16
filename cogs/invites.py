@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from modules.KiwiBot import KiwiBot
-from modules.types import ChannelId, GuildId, InviterId, UserId
+from modules.types import GuildId, InviterId, UserId
 
 log = logging.getLogger(__name__)
 
@@ -18,14 +18,12 @@ class InvitesCog(commands.Cog):
     # 1. Define the parent group for all invite commands
     invites = app_commands.Group(name="invites", description="Commands for invite tracking.")
 
-    def __init__(self, bot: KiwiBot, guild_id: GuildId, alert_channel_id: ChannelId) -> None:
+    def __init__(self, bot: KiwiBot) -> None:  # Removed guild_id, alert_channel_id from init
         self.bot = bot
-        # The cache now maps guild_id to a dictionary of {invite_code: uses}
-        self.invites: dict[int, dict[str, int]] = {}
-        self.privileged_guild_id = guild_id
-        self.alert_channel_id = alert_channel_id
+        self.invites: dict[int, dict[str, int]] = {}  # Cache still needed for invite diffing
 
-    async def cog_load(self) -> None:
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
         """Cache invites for all guilds on startup."""
         await self.recache_all_invites()
 
@@ -66,6 +64,9 @@ class InvitesCog(commands.Cog):
         if member.bot:
             return
 
+        config = await self.bot.config_db.get_guild_config(GuildId(member.guild.id))
+        alert_channel_id = config.join_leave_log_channel_id
+
         inviter = None
         found_invite = None
         try:
@@ -73,19 +74,20 @@ class InvitesCog(commands.Cog):
             current_invites = await member.guild.invites()
             # Compare current invites with the cached invites to find the one that was used
             for invite in current_invites:
-                if invite.code not in guild_invites or invite.uses > guild_invites.get(invite.code, 0):
+                if invite.uses is not None and (
+                    invite.code not in guild_invites or invite.uses > guild_invites.get(invite.code, 0)
+                ):
                     found_invite = invite
                     inviter = invite.inviter
                     break
 
             # Update the cache with the new uses
-            self.invites[member.guild.id] = {invite.code: invite.uses for invite in current_invites}
+            self.invites[member.guild.id] = {invite.code: invite.uses for invite in current_invites if invite.uses is not None}
 
         except discord.Forbidden:
-            log.warning("Missing 'Manage Server' permissions to read invites for tracking.")
-            # Only send alert if in privileged guild
-            if member.guild.id == self.privileged_guild_id:
-                alert_channel = self.bot.get_channel(self.alert_channel_id)
+            log.warning("Missing 'Manage Server' permissions for guild %d.", member.guild.id)
+            if alert_channel_id:
+                alert_channel = self.bot.get_channel(alert_channel_id)
                 if alert_channel:
                     await alert_channel.send(
                         f"⚠️ I don't have permission to view server invites to track who invited {member.mention}.",
@@ -93,9 +95,8 @@ class InvitesCog(commands.Cog):
             return
         except discord.HTTPException:
             log.exception("HTTP error fetching invites.")
-            # Only send alert if in privileged guild
-            if member.guild.id == self.privileged_guild_id:
-                alert_channel = self.bot.get_channel(self.alert_channel_id)
+            if alert_channel_id:
+                alert_channel = self.bot.get_channel(alert_channel_id)
                 if alert_channel:
                     await alert_channel.send(
                         f"⚠️ An API error occurred while trying to find the inviter for {member.mention}.",
@@ -109,12 +110,12 @@ class InvitesCog(commands.Cog):
         is_new_invite = await self.bot.invites_db.insert_invite(UserId(member.id), inviter_id, GuildId(member.guild.id))
 
         # --- Privileged Guild Logic: Send alert to the configured channel ---
-        if member.guild.id != self.privileged_guild_id:
-            return  # Stop here for non-privileged guilds
-
-        alert_channel = self.bot.get_channel(self.alert_channel_id)
-        if not alert_channel or not isinstance(alert_channel, discord.TextChannel):
-            log.warning("Could not find alert channel %s for invite tracking.", self.alert_channel_id)
+        # Now, this logic applies to any guild that has configured a join_leave_log_channel_id
+        if not alert_channel_id:
+            return  # No alert channel configured for this guild
+        alert_channel = self.bot.get_channel(alert_channel_id)
+        if not isinstance(alert_channel, discord.TextChannel):
+            log.warning("Could not find alert channel %s for invite tracking.", alert_channel_id)
             return
 
         if not inviter:
@@ -253,13 +254,5 @@ class InvitesCog(commands.Cog):
 
 async def setup(bot: KiwiBot) -> None:
     """Entry point for loading the cog."""
-    if not all([bot.config.guild_id, bot.config.join_leave_log_channel_id]):
-        log.error("InvitesCog not loaded due to missing environment variables.")
-        return
-    await bot.add_cog(
-        InvitesCog(
-            bot,
-            guild_id=bot.config.guild_id,
-            alert_channel_id=bot.config.join_leave_log_channel_id,
-        ),
-    )
+    # InvitesCog is now stateless and will fetch config per guild.
+    await bot.add_cog(InvitesCog(bot))

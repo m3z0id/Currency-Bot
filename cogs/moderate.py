@@ -6,11 +6,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from modules.types import RoleId
-
 if TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
 
+from modules.types import GuildId
 
 log = logging.getLogger(__name__)
 
@@ -62,9 +61,8 @@ class Moderate(commands.Cog):
     Provides slash commands for banning, kicking, muting, and timing out members.
     """
 
-    def __init__(self, bot: "KiwiBot", muted_role_id: RoleId | None) -> None:
+    def __init__(self, bot: "KiwiBot") -> None:
         self.bot = bot
-        self.muted_role_id = muted_role_id
 
     # Create a command group for all moderation actions
     moderate = app_commands.Group(
@@ -320,14 +318,15 @@ class Moderate(commands.Cog):
         if not await self._pre_action_checks(interaction, member):
             return
 
-        if not self.muted_role_id:
+        config = await self.bot.config_db.get_guild_config(GuildId(interaction.guild.id))
+        muted_role_id = config.muted_role_id
+        if not muted_role_id:
             await interaction.response.send_message(
-                "The Muted Role ID has not been configured by the bot owner.",
+                "The Muted Role has not been configured for this server. Use `/config set role`.",
                 ephemeral=True,
             )
             return
-
-        muted_role = await interaction.guild.fetch_role(self.muted_role_id)
+        muted_role = interaction.guild.get_role(muted_role_id)
         if not muted_role:
             await interaction.response.send_message(
                 "The configured muted role could not be found on this server. It may have been deleted.",
@@ -369,14 +368,15 @@ class Moderate(commands.Cog):
         if not await self._pre_action_checks(interaction, member):
             return
 
-        if not self.muted_role_id:
+        config = await self.bot.config_db.get_guild_config(GuildId(interaction.guild.id))
+        muted_role_id = config.muted_role_id
+        if not muted_role_id:
             await interaction.response.send_message(
-                "The Muted Role ID has not been configured by the bot owner.",
+                "The Muted Role has not been configured for this server. Use `/config set role`.",
                 ephemeral=True,
             )
             return
-
-        muted_role = await interaction.guild.fetch_role(self.muted_role_id)
+        muted_role = interaction.guild.get_role(muted_role_id)
         if not muted_role:
             await interaction.response.send_message(
                 "The configured muted role could not be found on this server. It may have been deleted.",
@@ -407,4 +407,4 @@ class Moderate(commands.Cog):
 
 async def setup(bot: "KiwiBot") -> None:
     """Add the cog to the bot."""
-    await bot.add_cog(Moderate(bot, muted_role_id=bot.config.muted_role_id))
+    await bot.add_cog(Moderate(bot))

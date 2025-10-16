@@ -29,39 +29,28 @@ class BumpHandlerCog(commands.Cog):
         self,
         bot: "KiwiBot",
         disboard_bot_id: UserId,
-        guild_id: GuildId,
-        bumper_role_id: RoleId,
-        backup_bumper_role_id: RoleId | None,
     ) -> None:
         self.bot = bot
         self.user_db: UserDB = bot.user_db
-        self.reminder_task: asyncio.Task | None = None
-
+        self.reminder_tasks: dict[GuildId, asyncio.Task | None] = {}
         self.disboard_bot_id = disboard_bot_id
-        self.guild_id = guild_id
-        self.bumper_role_id = bumper_role_id
-        self.backup_bumper_role_id = backup_bumper_role_id
 
     async def cog_load(self) -> None:
         """On cog load, find the last bump and process it to schedule a reminder."""
         log.info("BumpHandlerCog loaded. Searching for the last bump...")
-        guild = await self.bot.fetch_guild(self.guild_id)
-        if not guild:
-            log.error("Could not find guild %d for reminder scheduling.", self.guild_id)
-            return
-
-        last_bump_message = await self._find_last_bump_message(guild)
-        if last_bump_message:
-            log.info("Found historical bump message %s. Processing it.", last_bump_message.id)
-            # Process the found message, but don't re-reward the user.
-            await self._process_bump(last_bump_message, is_new_bump=False)
-        else:
-            log.info("No recent bump message found. No reminder scheduled.")
+        for guild in self.bot.guilds:
+            last_bump_message = await self._find_last_bump_message(guild)
+            if last_bump_message:
+                log.info("Found historical bump message %s in guild %s. Processing it.", last_bump_message.id, guild.name)
+                # Process the found message, but don't re-reward the user.
+                await self._process_bump(last_bump_message, is_new_bump=False)
+            else:
+                log.info("No recent bump message found in guild %s. No reminder scheduled.", guild.name)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         """Listen for new messages to detect and process a successful bump."""
-        if message.guild and message.guild.id == self.guild_id and self._is_successful_bump_message(message):
+        if message.guild and self._is_successful_bump_message(message):
             log.info("Detected a new bump in message %s. Processing it.", message.id)
             await self._process_bump(message, is_new_bump=True)
 
@@ -78,6 +67,14 @@ class BumpHandlerCog(commands.Cog):
             log.warning("Bump message %s has no interaction metadata.", message.id)
             return
 
+        guild_id = GuildId(message.guild.id)
+        config = await self.bot.config_db.get_guild_config(guild_id)
+        bumper_role_id = config.bumper_role_id
+
+        if not bumper_role_id:
+            log.debug("Skipping bump processing for guild %d: Bumper role not configured.", guild_id)
+            return
+
         bumper = message.interaction_metadata.user
         channel = message.channel
 
@@ -85,11 +82,13 @@ class BumpHandlerCog(commands.Cog):
             if is_new_bump:
                 reward = random.randint(50, 80)
                 user_id = UserId(bumper.id)
-                guild_id = GuildId(message.guild.id)
                 # Reward Currency
                 await self.bot.user_db.increment_stat(user_id, guild_id, StatName.CURRENCY, reward)
                 new_bump_count = await self.bot.user_db.increment_stat(user_id, guild_id, StatName.BUMPS, 1)
                 log.info("Rewarded %s with $%d for bumping.", bumper.display_name, reward)
+                # Ensure the channel is a TextChannel before sending
+                if not isinstance(channel, discord.TextChannel):
+                    return
                 await channel.send(
                     f"🎉 Thanks for your **{new_bump_count:,}th** bump, {bumper.mention}! You've received **${reward}**.",
                 )
@@ -103,24 +102,33 @@ class BumpHandlerCog(commands.Cog):
                 remaining_delay = BUMP_REMINDER_DELAY - time_since_bump
                 delay_seconds = remaining_delay.total_seconds()
 
-            await self._schedule_reminder(channel, bumper.mention, delay_seconds)
+            await self._schedule_reminder(
+                guild_id,
+                channel,
+                bumper.mention,
+                delay_seconds,
+            )
 
         except (discord.HTTPException, discord.Forbidden):
             log.exception("Error processing bump message %s.", message.id)
 
     async def _schedule_reminder(
         self,
-        channel: discord.TextChannel,
-        last_bumper: str,
+        guild_id: GuildId,  # Added guild_id to manage tasks per guild
+        channel: discord.TextChannel,  # Kept for sending the message
+        last_bumper: str,  # Kept for the message content
         delay_seconds: float,
     ) -> None:
         """Schedules or reschedules the bump reminder task."""
-        if self.reminder_task and not self.reminder_task.done():
-            self.reminder_task.cancel()
+        if (existing_task := self.reminder_tasks.get(guild_id)) and not existing_task.done():
+            existing_task.cancel()
 
         if delay_seconds <= 0:
             log.info("Reminder delay is zero or negative, sending now.")
-            await self._send_reminder_message(channel, last_bumper, self.bumper_role_id)
+            # Fetch config dynamically for immediate send
+            config = await self.bot.config_db.get_guild_config(guild_id)
+            if config.bumper_role_id:
+                await self._send_reminder_message(channel, last_bumper, config.bumper_role_id)
             return
 
         log.info("Scheduling bump reminder in %.2f seconds.", delay_seconds)
@@ -132,29 +140,34 @@ class BumpHandlerCog(commands.Cog):
         async def reminder_coro() -> None:
             # Stage 1: Primary Reminder
             if delay_seconds > 0:
-                await asyncio.sleep(delay_seconds)
+                await asyncio.sleep(delay_seconds)  # Wait for the primary reminder
 
-            await self._send_reminder_message(
-                channel,
-                last_bumper,
-                self.bumper_role_id,
-                is_backup=False,
-            )
+            # Fetch config again inside the coro to ensure it's up-to-date
+            current_config = await self.bot.config_db.get_guild_config(guild_id)
+            if current_config.bumper_role_id:
+                await self._send_reminder_message(
+                    channel,
+                    last_bumper,
+                    current_config.bumper_role_id,
+                    is_backup=False,
+                )
+
             # Stage 2: Backup Reminder (if configured)
-            if self.backup_bumper_role_id:
+            if current_config.backup_bumper_role_id:
                 # Calculate how long to wait from *now* until the backup is due.
                 # If the backup time is already in the past, this will be <= 0.
                 remaining_backup_wait = backup_delay_seconds - delay_seconds
                 if remaining_backup_wait > 0:
                     await asyncio.sleep(remaining_backup_wait)
-                await self._send_reminder_message(
-                    channel,
-                    last_bumper,
-                    self.backup_bumper_role_id,
-                    is_backup=True,
-                )
+                if current_config.backup_bumper_role_id:  # Re-check in case it was removed
+                    await self._send_reminder_message(
+                        channel,
+                        last_bumper,
+                        current_config.backup_bumper_role_id,
+                        is_backup=True,
+                    )
 
-        self.reminder_task = asyncio.create_task(reminder_coro())
+        self.reminder_tasks[guild_id] = asyncio.create_task(reminder_coro())
 
     async def _send_reminder_message(
         self,
@@ -195,8 +208,8 @@ class BumpHandlerCog(commands.Cog):
 
     async def _find_last_bump_message(self, guild: discord.Guild) -> discord.Message | None:
         """Scan channels to find the last successful bump message."""
-        # fetch_channels because cache isn't yet populated
-        candidate_channels = [c for c in (await guild.fetch_channels()) if "bump" in c.name.lower()]
+        # Use cached text_channels to avoid API calls on startup
+        candidate_channels = [c for c in guild.text_channels if "bump" in c.name.lower()]
         latest_bump_message: discord.Message | None = None
 
         for channel in candidate_channels:
@@ -223,16 +236,8 @@ class BumpHandlerCog(commands.Cog):
 
 async def setup(bot: "KiwiBot") -> None:
     """Load the cog."""
-    if not all([bot.config.disboard_bot_id, bot.config.guild_id, bot.config.bumper_role_id]):
-        log.error("BumpHandlerCog not loaded: One or more required IDs are not configured.")
+    if not bot.config.disboard_bot_id:
+        log.error("BumpHandlerCog not loaded: DISBOARD_BOT_ID is not configured.")
         return
-
-    await bot.add_cog(
-        BumpHandlerCog(
-            bot,
-            disboard_bot_id=bot.config.disboard_bot_id,
-            guild_id=bot.config.guild_id,
-            bumper_role_id=bot.config.bumper_role_id,
-            backup_bumper_role_id=bot.config.backup_bumper_role_id,
-        ),
-    )
+    # BumpHandlerCog is now mostly stateless, disboard_bot_id is global.
+    await bot.add_cog(BumpHandlerCog(bot, bot.config.disboard_bot_id))

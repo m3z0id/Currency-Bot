@@ -3,16 +3,20 @@ import logging
 import discord
 from discord.ext import commands, tasks
 
+from modules.KiwiBot import KiwiBot
+from modules.types import GuildId
+
 # Set up basic logging
 log = logging.getLogger(__name__)
 
 UPDATE_INTERVAL_MINUTES = 5
 
 
+@commands.guild_only()
 class ServerStats(commands.Cog):
     """A cog that automatically updates server statistics in designated voice channels."""
 
-    def __init__(self, bot: commands.Bot) -> None:
+    def __init__(self, bot: KiwiBot) -> None:
         self.bot = bot
         self.update_stats.start()
 
@@ -28,72 +32,45 @@ class ServerStats(commands.Cog):
 
     async def _update_guild_stats(self, guild: discord.Guild) -> None:
         """Handle the statistics update for a single guild."""
-        for role in guild.roles:
-            if role.name == "Tag Users":
-                tag_members_count = len(role.members)
-                break
-        else:
-            log.debug("Could not find tag role in guild '%s'.", guild.name)
-            tag_members_count = 0
+        # 1. Fetch the configuration for this specific guild
+        config = await self.bot.config_db.get_guild_config(GuildId(guild.id))
 
-        # Count members who have at least one role (failed or passed captcha)
-        member_count = len(
-            [m for m in guild.members if not m.bot and m.flags.completed_onboarding and len(m.roles) > 1],
-        )
+        # 2. Get channel and role objects from the config IDs
+        member_channel = guild.get_channel(config.member_count_channel_id) if config.member_count_channel_id else None
+        tag_role = guild.get_role(config.tag_role_id) if config.tag_role_id else None
+        tag_channel = guild.get_channel(config.tag_role_channel_id) if config.tag_role_channel_id else None
 
-        # Iterate through all channels to find stat channels
-        for channel in guild.channels:
-            # We only care about voice channels as they are commonly used for stats
-            if not isinstance(channel, discord.VoiceChannel):
-                continue
+        # 3. Update Member Count Channel
+        if isinstance(member_channel, discord.VoiceChannel):
+            member_count = len([m for m in guild.members if not m.bot])
+            new_name = f"All members: {member_count}"
+            if member_channel.name != new_name:
+                try:
+                    await member_channel.edit(name=new_name, reason="Automated server stats update")
+                    log.info(
+                        "Updated 'All members' count for '%s' to %s.",
+                        guild.name,
+                        member_count,
+                    )
+                except (discord.Forbidden, discord.HTTPException):
+                    log.exception("Failed to update member count for guild %s", guild.name)
 
-            # Check if the channel is a "private" stats channel
-            perms = channel.permissions_for(guild.default_role)
-            if not (perms.view_channel and not perms.connect):
-                continue
-
-            # Update the channel name if necessary
-            try:
-                if channel.name.startswith("All members:"):
-                    new_name = f"All members: {member_count}"
-                    if channel.name != new_name:
-                        await channel.edit(
-                            name=new_name,
-                            reason="Automated server stats update",
-                        )
-                        log.info(
-                            "Updated 'All members' count for '%s' to %s.",
-                            guild.name,
-                            member_count,
-                        )
-
-                elif channel.name.startswith("Tag Users:"):
-                    new_name = f"Tag Users: {tag_members_count}"
-                    if channel.name != new_name:
-                        await channel.edit(
-                            name=new_name,
-                            reason="Automated server stats update",
-                        )
-                        log.info(
-                            "Updated 'Tag Users' count for '%s' to %s.",
-                            guild.name,
-                            tag_members_count,
-                        )
-
-            except discord.Forbidden:
-                log.exception(
-                    "Missing 'Manage Channels' permission in guild '%s' to update stats.",
-                    guild.name,
-                )
-                # We can break here since we likely can't edit any channels in this guild
-                break
-            except discord.HTTPException:
-                log.exception(
-                    "An HTTP error occurred while updating channel in '%s'",
-                    guild.name,
-                )
+        # 4. Update Tag Role Count Channel
+        if isinstance(tag_channel, discord.VoiceChannel) and tag_role:
+            tag_members_count = len(tag_role.members)
+            new_name = f"Tag Users: {tag_members_count}"
+            if tag_channel.name != new_name:
+                try:
+                    await tag_channel.edit(name=new_name, reason="Automated server stats update")
+                    log.info(
+                        "Updated 'Tag Users' count for '%s' to %s.",
+                        guild.name,
+                        tag_members_count,
+                    )
+                except (discord.Forbidden, discord.HTTPException):
+                    log.exception("Failed to update tag role count for guild %s", guild.name)
 
 
-async def setup(bot: commands.Bot) -> None:
+async def setup(bot: KiwiBot) -> None:
     """Add the cog to the bot."""
     await bot.add_cog(ServerStats(bot))

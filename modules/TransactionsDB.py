@@ -29,14 +29,14 @@ class TransactionsDB:
                 f"""
                 CREATE TABLE IF NOT EXISTS {self.TRANSACTIONS_TABLE} (
                     transaction_id    INTEGER PRIMARY KEY,
-                    guild_id          INTEGER NOT NULL,
-                    sender_id         INTEGER NOT NULL,
-                    receiver_id       INTEGER NOT NULL,
+                    guild_id          INTEGER NOT NULL CHECK(guild_id > 1000000),
+                    sender_id         INTEGER NOT NULL CHECK(sender_id > 1000000),
+                    receiver_id       INTEGER NOT NULL CHECK(receiver_id > 1000000),
                     stat_name         TEXT NOT NULL CHECK(stat_name IN ('currency')),
                     amount            INTEGER NOT NULL CHECK(amount > 0),
                     timestamp         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
-                    FOREIGN KEY (sender_id, guild_id) REFERENCES users(discord_id, guild_id) ON DELETE CASCADE,
-                    FOREIGN KEY (receiver_id, guild_id) REFERENCES users(discord_id, guild_id) ON DELETE CASCADE,
+                    FOREIGN KEY (sender_id, guild_id) REFERENCES users(discord_id, guild_id),
+                    FOREIGN KEY (receiver_id, guild_id) REFERENCES users(discord_id, guild_id),
                     CHECK(sender_id <> receiver_id)
                 ) STRICT;
                 """,

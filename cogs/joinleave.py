@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 import discord
 from discord.ext import commands
 
-from modules.types import ChannelId, GuildId
+from modules.types import GuildId
 
 if TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
@@ -15,27 +15,8 @@ log = logging.getLogger(__name__)
 class JoinLeaveLogCog(commands.Cog):
     """A cog for logging member join and leave events to a specified channel."""
 
-    def __init__(self, bot: "KiwiBot", guild_id: GuildId, channel_id: ChannelId) -> None:
+    def __init__(self, bot: "KiwiBot") -> None:
         self.bot = bot
-        self.privileged_guild_id = guild_id
-        self.channel_id = channel_id
-        self.log_channel: discord.TextChannel | None = None
-
-    async def cog_load(self) -> None:
-        """Fetch the channel object when the cog is loaded."""
-        # Only attempt to fetch the channel if we are in the privileged guild context
-        guild = await self.bot.fetch_guild(self.privileged_guild_id)
-        if not guild:
-            return
-
-        channel = await self.bot.fetch_channel(self.channel_id)
-        if isinstance(channel, discord.TextChannel):
-            self.log_channel = channel
-            log.info("Join/Leave logging channel set to #%s", self.log_channel.name)
-        else:
-            log.error(
-                "Could not find the JOIN_LEAVE_LOG_CHANNEL_ID channel or it is not a text channel.",
-            )
 
     async def _log_event(
         self,
@@ -44,8 +25,10 @@ class JoinLeaveLogCog(commands.Cog):
         color: discord.Colour,
         description_parts: list[str],
     ) -> None:
-        """Construct and sends a standardized embed for join/leave events."""
-        if not self.log_channel:
+        config = await self.bot.config_db.get_guild_config(GuildId(member.guild.id))
+        log_channel_id = config.join_leave_log_channel_id
+
+        if not log_channel_id:
             log.warning("Log channel not available, cannot send join/leave log.")
             return
 
@@ -63,17 +46,27 @@ class JoinLeaveLogCog(commands.Cog):
         embed.set_thumbnail(url=member.display_avatar)
         embed.title = title
 
+        log_channel = self.bot.get_channel(log_channel_id)
+        if not isinstance(log_channel, discord.TextChannel):
+            log.warning(
+                "Configured join/leave log channel %d not found or is not a text channel for guild %d.",
+                log_channel_id,
+                member.guild.id,
+            )
+            return
+
         try:
             # Defensively disable all pings. Only display mentions.
-            await self.log_channel.send(embed=embed, allowed_mentions=None)
+            await log_channel.send(embed=embed, allowed_mentions=None)
         except (discord.Forbidden, discord.HTTPException):
             log.exception("Failed to send message to join/leave log channel")
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
         """Handle logging when a new member joins or rejoins the server."""
-        if member.guild.id != self.privileged_guild_id:
-            return
+        config = await self.bot.config_db.get_guild_config(GuildId(member.guild.id))
+        if not config.join_leave_log_channel_id:
+            return  # This guild hasn't configured this feature, so we do nothing.
 
         # Use the did_rejoin flag to determine the event type
         if member.flags.did_rejoin:
@@ -103,8 +96,9 @@ class JoinLeaveLogCog(commands.Cog):
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member) -> None:
         """Handle logging when a member leaves the server."""
-        if member.guild.id != self.privileged_guild_id:
-            return
+        config = await self.bot.config_db.get_guild_config(GuildId(member.guild.id))
+        if not config.join_leave_log_channel_id:
+            return  # This guild hasn't configured this feature, so we do nothing.
 
         title = "Member Left"
         color = discord.Colour.orange()
@@ -131,16 +125,5 @@ class JoinLeaveLogCog(commands.Cog):
 
 async def setup(bot: "KiwiBot") -> None:
     """Add the cog to the bot."""
-    if not all([bot.config.guild_id, bot.config.join_leave_log_channel_id]):
-        log.warning(
-            "GUILD_ID or JOIN_LEAVE_LOG_CHANNEL_ID is not configured. JoinLeaveLogCog will not be loaded.",
-        )
-        return
-
-    await bot.add_cog(
-        JoinLeaveLogCog(
-            bot,
-            guild_id=bot.config.guild_id,
-            channel_id=bot.config.join_leave_log_channel_id,
-        ),
-    )
+    # JoinLeaveLogCog is now stateless and will fetch config per guild.
+    await bot.add_cog(JoinLeaveLogCog(bot))

@@ -6,7 +6,7 @@ import typing
 import discord
 from discord.ext import commands
 
-from modules.types import ChannelId, GuildId, RoleId
+from modules.types import GuildId
 
 if typing.TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
@@ -17,25 +17,8 @@ log = logging.getLogger(__name__)
 class ModLogCog(commands.Cog):
     """A cog for logging moderation actions to a specified channel."""
 
-    def __init__(self, bot: "KiwiBot", guild_id: GuildId, mod_channel_id: ChannelId, muted_role_id: RoleId | None) -> None:
+    def __init__(self, bot: "KiwiBot") -> None:
         self.bot = bot
-        self.privileged_guild_id = guild_id
-        self.mod_channel_id = mod_channel_id
-        self.muted_role_id = muted_role_id
-        self.mod_channel: discord.TextChannel | None = None
-
-    async def cog_load(self) -> None:
-        """Fetch the channel object when the cog is loaded."""
-        if not self.bot.get_guild(self.privileged_guild_id):
-            return
-        channel = await self.bot.fetch_channel(self.mod_channel_id)
-        if isinstance(channel, discord.TextChannel):
-            self.mod_channel = channel
-            log.info("Moderation logging channel set to #%s", self.mod_channel.name)
-        else:
-            log.error(
-                "Could not find the MOD_CHANNEL_ID channel or it is not a text channel.",
-            )
 
     async def _log_action(
         self,
@@ -46,10 +29,16 @@ class ModLogCog(commands.Cog):
         moderator: discord.User | None,
         reason: str | None,
         duration: str | None = None,
+        guild_id: GuildId | None = None,  # Added guild_id to fetch config dynamically
         include_reason: bool = True,
     ) -> None:
         """Create and send the log embed."""
-        if not self.mod_channel:
+        if not guild_id:
+            log.warning("Cannot log action without a guild ID.")
+            return
+        config = await self.bot.config_db.get_guild_config(guild_id)
+        mod_channel_id = config.mod_log_channel_id
+        if not mod_channel_id:
             return
 
         embed = discord.Embed(
@@ -74,10 +63,20 @@ class ModLogCog(commands.Cog):
         if duration:
             embed.add_field(name="Ends On", value=duration, inline=False)
 
+        mod_channel = self.bot.get_channel(mod_channel_id)
+        if not isinstance(mod_channel, discord.TextChannel):
+            log.warning(
+                "Configured mod log channel %d not found or is not a text channel for guild %d.",
+                mod_channel_id,
+                guild_id,
+            )
+            return
+
         try:
             # Defensively disable all pings. Only display mentions.
-            await self.mod_channel.send(embed=embed, allowed_mentions=None)
+            await mod_channel.send(embed=embed, allowed_mentions=None)
         except (discord.Forbidden, discord.HTTPException):
+            # Log the exception but don't re-raise, as logging should not block other operations.
             log.exception("Failed to send log message to mod channel")
 
     async def _fetch_audit_entry(
@@ -108,7 +107,11 @@ class ModLogCog(commands.Cog):
         guild: discord.Guild,
         user: discord.User | discord.Member,
     ) -> None:
-        if guild.id != self.privileged_guild_id:
+        config = await self.bot.config_db.get_guild_config(GuildId(guild.id))
+        mod_channel_id = config.mod_log_channel_id
+
+        if not mod_channel_id:
+            # This guild hasn't configured this feature, so we do nothing.
             return
 
         moderator, reason = await self._fetch_audit_entry(
@@ -122,13 +125,17 @@ class ModLogCog(commands.Cog):
             member=user,
             moderator=moderator,
             reason=reason,
+            guild_id=GuildId(guild.id),
         )
 
     @commands.Cog.listener()
     async def on_member_unban(self, guild: discord.Guild, user: discord.User) -> None:
-        if guild.id != self.privileged_guild_id:
-            return
+        config = await self.bot.config_db.get_guild_config(GuildId(guild.id))
+        mod_channel_id = config.mod_log_channel_id
 
+        if not mod_channel_id:
+            # This guild hasn't configured this feature, so we do nothing.
+            return
         moderator, reason = await self._fetch_audit_entry(
             guild,
             user,
@@ -140,13 +147,17 @@ class ModLogCog(commands.Cog):
             member=user,
             moderator=moderator,
             reason=reason,
+            guild_id=GuildId(guild.id),
             include_reason=False,  # Reason field is not shown
         )
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member) -> None:
-        if member.guild.id != self.privileged_guild_id:
-            return
+        config = await self.bot.config_db.get_guild_config(GuildId(member.guild.id))
+        mod_channel_id = config.mod_log_channel_id
+
+        if not mod_channel_id:
+            return  # This guild hasn't configured this feature, so we do nothing.
 
         moderator, reason = await self._fetch_audit_entry(
             member.guild,
@@ -161,6 +172,7 @@ class ModLogCog(commands.Cog):
                 member=member,
                 moderator=moderator,
                 reason=reason,
+                guild_id=GuildId(member.guild.id),
             )
 
     @commands.Cog.listener()
@@ -169,7 +181,10 @@ class ModLogCog(commands.Cog):
         before: discord.Member,
         after: discord.Member,
     ) -> None:
-        if before.guild.id != self.privileged_guild_id:
+        config = await self.bot.config_db.get_guild_config(GuildId(before.guild.id))
+        mod_channel_id = config.mod_log_channel_id
+
+        if not mod_channel_id:
             return
 
         if before.timed_out_until != after.timed_out_until:
@@ -189,6 +204,7 @@ class ModLogCog(commands.Cog):
                     member=after,
                     moderator=moderator,
                     reason=reason,
+                    guild_id=GuildId(after.guild.id),
                     duration=duration_str,
                 )
             # Timeout Removed
@@ -204,12 +220,14 @@ class ModLogCog(commands.Cog):
                     member=after,
                     moderator=moderator,
                     reason=reason,
+                    guild_id=GuildId(after.guild.id),
                     include_reason=False,
                 )
 
         # --- Muted Role Tracking ---
-        if self.muted_role_id and before.roles != after.roles:
-            muted_role = after.guild.get_role(self.muted_role_id)
+        muted_role_id = config.muted_role_id
+        if muted_role_id and before.roles != after.roles:
+            muted_role = after.guild.get_role(muted_role_id)
             if not muted_role:
                 return
 
@@ -226,6 +244,7 @@ class ModLogCog(commands.Cog):
                     member=after,
                     moderator=moderator,
                     reason=reason,
+                    guild_id=GuildId(after.guild.id),
                 )
             # Role removed
             elif muted_role in before.roles and muted_role not in after.roles:
@@ -240,21 +259,12 @@ class ModLogCog(commands.Cog):
                     member=after,
                     moderator=moderator,
                     reason=reason,
+                    guild_id=GuildId(after.guild.id),
                     include_reason=False,
                 )
 
 
 async def setup(bot: "KiwiBot") -> None:
     """Add the cog to the bot."""
-    if not all([bot.config.guild_id, bot.config.mod_channel_id]):
-        log.warning("GUILD_ID or MOD_CHANNEL_ID is not configured. ModLog cog will not be loaded.")
-        return
-
-    await bot.add_cog(
-        ModLogCog(
-            bot,
-            guild_id=bot.config.guild_id,
-            mod_channel_id=bot.config.mod_channel_id,
-            muted_role_id=bot.config.muted_role_id,
-        ),
-    )
+    # ModLogCog is now stateless and will fetch config per guild.
+    await bot.add_cog(ModLogCog(bot))

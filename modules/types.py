@@ -11,7 +11,7 @@ GuildId = NewType("GuildId", int)
 ChannelId = NewType("ChannelId", int)
 RoleId = NewType("RoleId", int)
 MessageId = NewType("MessageId", int)
-
+type RoleIdList = list[int]
 
 # --- Semantic Type Aliases ---
 # For complex types that appear in multiple places.

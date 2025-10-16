@@ -132,7 +132,12 @@ class UserDB:
             )
             await conn.commit()
 
-    async def set_leveling_opt_out(self, user_id: UserId, guild_id: GuildId, is_opted_out: bool) -> None:
+    async def set_leveling_opt_out(
+        self,
+        user_id: UserId,
+        guild_id: GuildId,
+        is_opted_out: bool,
+    ) -> None:
         """Set the leveling opt-out preference for a user."""
         async with self.database.get_conn() as conn:
             await conn.execute(
@@ -317,7 +322,12 @@ class UserDB:
 
     # --- Stat Methods (Migrated from StatsDB) ---
 
-    async def get_stat(self, user_id: UserId, guild_id: GuildId, stat: StatName) -> NonNegativeInt:
+    async def get_stat(
+        self,
+        user_id: UserId,
+        guild_id: GuildId,
+        stat: StatName,
+    ) -> NonNegativeInt:
         """Get a single stat for a user, returning 0 if they don't exist."""
         async with self.database.get_cursor() as cursor:
             # The stat name is from an enum, so it's safe to use in an f-string.
@@ -328,7 +338,13 @@ class UserDB:
             result = await cursor.fetchone()
         return NonNegativeInt(int(result[0])) if result else NonNegativeInt(0)
 
-    async def increment_stat(self, user_id: UserId, guild_id: GuildId, stat: StatName, amount: PositiveInt) -> int:
+    async def increment_stat(
+        self,
+        user_id: UserId,
+        guild_id: GuildId,
+        stat: StatName,
+        amount: PositiveInt,
+    ) -> NonNegativeInt:
         """Atomically increments a user's stat using a positive value and returns the new value."""
         # stat.value is 'currency', 'bumps', or 'xp' which we safely use to build the query
         sql = f"""
@@ -342,7 +358,7 @@ class UserDB:
             cursor = await conn.execute(sql, (user_id, guild_id, amount))
             new_value_row = await cursor.fetchone()
             await conn.commit()
-        return int(new_value_row[0]) if new_value_row else 0
+        return NonNegativeInt(int(new_value_row[0]) if new_value_row else 0)
 
     async def decrement_stat(
         self,
@@ -365,7 +381,13 @@ class UserDB:
             await conn.commit()
         return int(new_value_row[0]) if new_value_row else None
 
-    async def set_stat(self, user_id: UserId, guild_id: GuildId, stat: StatName, value: int) -> None:
+    async def set_stat(
+        self,
+        user_id: UserId,
+        guild_id: GuildId,
+        stat: StatName,
+        value: int,
+    ) -> None:
         """Atomically sets a user's stat to a specific value."""
         sql = f"""
             INSERT INTO {self.USERS_TABLE} (discord_id, guild_id, {stat.value})
@@ -452,7 +474,11 @@ class UserDB:
             rows = await cursor.fetchall()
             return [(row[0], UserId(row[1]), row[2]) for row in rows]
 
-    async def get_level_and_xp(self, user_id: UserId, guild_id: GuildId) -> tuple[int, int] | None:
+    async def get_level_and_xp(
+        self,
+        user_id: UserId,
+        guild_id: GuildId,
+    ) -> tuple[int, int] | None:
         """Fetch the level and XP for a user."""
         async with self.database.get_cursor() as cursor:
             await cursor.execute(
