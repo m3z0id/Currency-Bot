@@ -70,6 +70,15 @@ class ModLogCog(commands.Cog):
                 mod_channel_id,
                 guild_id,
             )
+            await self.bot.log_admin_warning(
+                guild_id=guild_id,
+                warning_type="log_channel_missing",
+                description=(
+                    f"The `Moderation Log` channel (`{mod_channel_id}`) could not be found. "
+                    "It may have been deleted. Moderation actions will not be logged."
+                ),
+                level="ERROR",
+            )
             return
 
         try:
@@ -78,6 +87,15 @@ class ModLogCog(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             # Log the exception but don't re-raise, as logging should not block other operations.
             log.exception("Failed to send log message to mod channel")
+            await self.bot.log_admin_warning(
+                guild_id=guild_id,
+                warning_type="log_channel_permission",
+                description=(
+                    f"I failed to send a message to the `Moderation Log` channel ({mod_channel.mention}). "
+                    "Please check my `Send Messages` and `Embed Links` permissions in that channel."
+                ),
+                level="ERROR",
+            )
 
     async def _fetch_audit_entry(
         self,

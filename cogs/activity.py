@@ -51,14 +51,28 @@ class Activity(commands.Cog):
         if not self.activity_cache:
             return
 
+        # We need to know which guilds to log to *before* we clear the cache
+        guild_ids_in_batch = {guild_id for _, guild_id in self.activity_cache}
+
         try:
             await self.bot.user_db.update_active_users(list(self.activity_cache))
-            log.info(
+            log.debug(
                 "Flushed %d user activities to database",
                 len(self.activity_cache),
             )
         except Exception:
             log.exception("Error in flush_activity_cache background task")
+            for guild_id in guild_ids_in_batch:
+                await self.bot.log_admin_warning(
+                    guild_id=guild_id,
+                    warning_type="db_flush_fail",
+                    description=(
+                        "An error occurred in the `flush_activity_cache` background task. "
+                        "User activity is not being saved. This may be a database issue. "
+                        "Check console logs for details."
+                    ),
+                    level="ERROR",
+                )
         finally:
             self.activity_cache.clear()
 

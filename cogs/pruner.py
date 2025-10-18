@@ -1,7 +1,6 @@
 import logging
 from typing import TYPE_CHECKING
 
-import discord
 from discord import Forbidden, HTTPException
 from discord.ext import commands, tasks
 
@@ -61,25 +60,16 @@ class PrunerCog(commands.Cog):
                 continue
 
             # Get inactive user IDs from the database
-            inactive_user_ids = await self.user_db.get_inactive_users(GuildId(guild.id), inactivity_days)
+            inactive_user_ids = set(await self.user_db.get_inactive_users(GuildId(guild.id), inactivity_days))
             if not inactive_user_ids:
                 log.debug("No inactive users found in the database to prune for guild '%s'.", guild.name)
                 continue
 
             total_members_pruned = 0
-            for user_id in inactive_user_ids:
-                try:
-                    # Use fetch_member instead of get_member to ensure we get the member
-                    # even if they're not in the bot's cache
-                    member = await guild.fetch_member(user_id)
-                except discord.NotFound:
-                    continue  # User is no longer in the guild, skip them
-                except discord.HTTPException:
-                    log.exception("Failed to fetch member %s", user_id)
+            # Iterate through cached members (safe approximation)
+            for member in guild.members:
+                if member.id not in inactive_user_ids:
                     continue
-
-                if not member:
-                    continue  # User is not in the target guild
 
                 # Find which of the prunable roles the member actually has
                 roles_to_remove = [role for role in member.roles if role in prunable_roles]
@@ -108,6 +98,16 @@ class PrunerCog(commands.Cog):
                         log.exception(
                             "Failed to prune %s: Missing Permissions.",
                             member.display_name,
+                        )
+                        await self.bot.log_admin_warning(
+                            guild_id=GuildId(guild.id),
+                            warning_type="prune_permission",
+                            description=(
+                                f"I failed to prune roles from {member.mention}.\n\n"
+                                "**Reason**: `discord.Forbidden`. This is a role hierarchy problem. "
+                                "Please ensure my bot role is higher than the roles I am trying to remove."
+                            ),
+                            level="ERROR",
                         )
                     except HTTPException:
                         log.exception("Failed to prune %s", member.display_name)

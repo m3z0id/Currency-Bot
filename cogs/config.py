@@ -17,14 +17,28 @@ ChannelSetting = Literal[
     "level_up_channel_id",
     "member_count_channel_id",
     "tag_role_channel_id",
+    "bot_warning_channel_id",
 ]
-RoleSetting = Literal["bumper_role_id", "backup_bumper_role_id", "muted_role_id", "tag_role_id"]
+RoleSetting = Literal[
+    "bumper_role_id",
+    "backup_bumper_role_id",
+    "muted_role_id",
+    "tag_role_id",
+    "verified_role_id",
+    "automute_role_id",
+    "xp_opt_out_role_id",
+]
 
 
 class AutodiscoverView(discord.ui.View):
     """An interactive UI for the /config autodiscover command."""
 
-    def __init__(self, bot: KiwiBot, author_id: int, suggestions: dict[str, int]) -> None:
+    def __init__(
+        self,
+        bot: KiwiBot,
+        author_id: int,
+        suggestions: dict[str, int],
+    ) -> None:
         super().__init__(timeout=180)
         self.bot = bot
         self.author_id = author_id
@@ -33,12 +47,23 @@ class AutodiscoverView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Ensure only the command author can interact."""
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message("This isn't your confirmation menu.", ephemeral=True)
+            await interaction.response.send_message(
+                "This isn't your confirmation menu.",
+                ephemeral=True,
+            )
             return False
         return True
 
-    @discord.ui.button(label="Save Suggestions", style=discord.ButtonStyle.success, emoji="💾")
-    async def save_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+    @discord.ui.button(
+        label="Save Suggestions",
+        style=discord.ButtonStyle.success,
+        emoji="💾",
+    )
+    async def save_button(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
         """Save the discovered settings to the database."""
         if not interaction.guild_id:
             return
@@ -59,17 +84,25 @@ class AutodiscoverView(discord.ui.View):
         )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+    async def cancel_button(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
         """Cancel the operation and disable the view."""
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(content="❌ Operation cancelled. No settings were changed.", view=self)
+        await interaction.response.edit_message(
+            content="❌ Operation cancelled. No settings were changed.",
+            view=self,
+        )
 
 
-def get_suggestions(guild: discord.Guild) -> dict[str, int | None]:
+def get_suggestions(guild: discord.Guild) -> dict[str, int | None]:  # noqa: PLR0912
     suggestions: dict[str, int | None] = {
         "mod_log_channel_id": None,
         "join_leave_log_channel_id": None,
+        "bot_warning_channel_id": None,
         "level_up_channel_id": None,
         "bumper_role_id": None,
         "backup_bumper_role_id": None,
@@ -77,20 +110,29 @@ def get_suggestions(guild: discord.Guild) -> dict[str, int | None]:
         "member_count_channel_id": None,
         "tag_role_id": None,
         "tag_role_channel_id": None,
+        "verified_role_id": None,
+        "automute_role_id": None,
+        "xp_opt_out_role_id": None,
     }
 
-    # Scan Channels
+    # Scan Text Channels for logs and fallbacks
     for channel in guild.text_channels:
         name = channel.name.lower()
         if "mod" in name and "log" in name:
             suggestions["mod_log_channel_id"] = channel.id
+        if "bot" in name and ("warn" in name or "log" in name or "alert" in name):
+            suggestions["bot_warning_channel_id"] = channel.id
         if "join" in name or "leave" in name or "welcome" in name:
             suggestions["join_leave_log_channel_id"] = channel.id
         if "level" in name:
             suggestions["level_up_channel_id"] = channel.id
-        if "member" in name and "count" in name:
+
+    # Scan Voice Channels for stats
+    for channel in guild.voice_channels:
+        name = channel.name.lower()
+        if "member" in name:
             suggestions["member_count_channel_id"] = channel.id
-        if "tag" in name and "user" in name and "count" in name:
+        if "tag" in name and "user" in name:
             suggestions["tag_role_channel_id"] = channel.id
 
     # Scan Roles
@@ -104,13 +146,23 @@ def get_suggestions(guild: discord.Guild) -> dict[str, int | None]:
             suggestions["backup_bumper_role_id"] = role.id
         if "tag" in name and "user" in name:
             suggestions["tag_role_id"] = role.id
+        if "member" in name:
+            suggestions["verified_role_id"] = role.id
+        if "auto" in name and "mute" in name:
+            suggestions["automute_role_id"] = role.id
+        if "xp" in name and "opt" in name and "out" in name:
+            suggestions["xp_opt_out_role_id"] = role.id
 
     return suggestions
 
 
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
-class Config(commands.GroupCog, name="config", description="Manage server-specific bot settings."):
+class Config(
+    commands.GroupCog,
+    name="config",
+    description="Manage server-specific bot settings.",
+):
     """A cog for guild-specific configuration with slash commands."""
 
     def __init__(self, bot: KiwiBot) -> None:
@@ -126,7 +178,9 @@ class Config(commands.GroupCog, name="config", description="Manage server-specif
         if not interaction.guild:
             return  # Should be unreachable due to guild_only
 
-        config = await self.bot.config_db.get_guild_config(GuildId(interaction.guild.id))
+        config = await self.bot.config_db.get_guild_config(
+            GuildId(interaction.guild.id),
+        )
 
         embed = discord.Embed(
             title=f"Configuration for {interaction.guild.name}",
@@ -138,14 +192,24 @@ class Config(commands.GroupCog, name="config", description="Manage server-specif
             "Moderation Log": config.mod_log_channel_id,
             "Join/Leave Log": config.join_leave_log_channel_id,
             "Level-Up Announcements": config.level_up_channel_id,
+            "Bot Warning Log": config.bot_warning_channel_id,
             "Member Count Channel": config.member_count_channel_id,
             "Tag Role Count Channel": config.tag_role_channel_id,
+        }
+        forwarding = {
+            "Forwarding Source Bot": (f"<@{config.qotd_source_bot_id}>" if config.qotd_source_bot_id else "*Not Set*"),
+            "Forwarding Target Channel": (
+                f"<#{config.qotd_target_channel_id}>" if config.qotd_target_channel_id else "*Not Set*"
+            ),
         }
         roles = {
             "Bumper Role": config.bumper_role_id,
             "Backup Bumper Role": config.backup_bumper_role_id,
             "Muted Role": config.muted_role_id,
             "Tag Role": config.tag_role_id,
+            "Verified Role": config.verified_role_id,
+            "Automute Role": config.automute_role_id,
+            "XP Opt-Out Role": config.xp_opt_out_role_id,
         }
         other = {
             "Inactive Member Prune Days": f"{config.inactivity_days} days",
@@ -171,14 +235,24 @@ class Config(commands.GroupCog, name="config", description="Manage server-specif
             inline=False,
         )
         embed.add_field(
+            name="↪️ Forwarding",
+            value="\n".join(f"**{name}**: {value}" for name, value in forwarding.items()),
+            inline=False,
+        )
+        embed.add_field(
             name="⚙️ Other",
             value="\n".join(f"**{name}**: {value}" for name, value in other.items()),
             inline=False,
         )
-        embed.set_footer(text="A setting that is 'Not Set' means the related feature is disabled.")
+        embed.set_footer(
+            text="A setting that is 'Not Set' means the related feature is disabled.",
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="channel", description="Set or clear a feature's channel.")
+    @app_commands.command(
+        name="channel",
+        description="Set or clear a feature's channel.",
+    )
     @app_commands.describe(
         feature="The feature to configure the channel for.",
         channel="The channel to use. Omit to disable the feature.",
@@ -186,24 +260,41 @@ class Config(commands.GroupCog, name="config", description="Manage server-specif
     @app_commands.choices(
         feature=[
             app_commands.Choice(name="Moderation Log", value="mod_log_channel_id"),
-            app_commands.Choice(name="Join/Leave Log", value="join_leave_log_channel_id"),
-            app_commands.Choice(name="Level-Up Announcements", value="level_up_channel_id"),
-            app_commands.Choice(name="Member Count Channel", value="member_count_channel_id"),
-            app_commands.Choice(name="Tag Role Count Channel", value="tag_role_channel_id"),
+            app_commands.Choice(
+                name="Join/Leave Log",
+                value="join_leave_log_channel_id",
+            ),
+            app_commands.Choice(
+                name="Level-Up Announcements",
+                value="level_up_channel_id",
+            ),
+            app_commands.Choice(
+                name="Member Count Channel",
+                value="member_count_channel_id",
+            ),
+            app_commands.Choice(
+                name="Tag Role Count Channel",
+                value="tag_role_channel_id",
+            ),
+            app_commands.Choice(name="Bot Warning Log", value="bot_warning_channel_id"),
         ],
     )
     async def set_channel(
         self,
         interaction: discord.Interaction,
         feature: app_commands.Choice[str],  # ChannelSetting
-        channel: discord.TextChannel | None = None,
+        channel: discord.TextChannel | discord.VoiceChannel | None = None,
     ) -> None:
         """Set or unset a channel configuration."""
         if not interaction.guild_id:
             return
 
         value = channel.id if channel else None
-        await self.bot.config_db.set_setting(GuildId(interaction.guild_id), feature.value, value)
+        await self.bot.config_db.set_setting(
+            GuildId(interaction.guild_id),
+            feature.value,
+            value,
+        )
 
         if channel:
             await interaction.response.send_message(
@@ -224,9 +315,15 @@ class Config(commands.GroupCog, name="config", description="Manage server-specif
     @app_commands.choices(
         feature=[
             app_commands.Choice(name="Bumper Role", value="bumper_role_id"),
-            app_commands.Choice(name="Backup Bumper Role", value="backup_bumper_role_id"),
+            app_commands.Choice(
+                name="Backup Bumper Role",
+                value="backup_bumper_role_id",
+            ),
             app_commands.Choice(name="Muted Role", value="muted_role_id"),
             app_commands.Choice(name="Tag Role", value="tag_role_id"),
+            app_commands.Choice(name="Verified Role", value="verified_role_id"),
+            app_commands.Choice(name="Automute Role", value="automute_role_id"),
+            app_commands.Choice(name="XP Opt-Out Role", value="xp_opt_out_role_id"),
         ],
     )
     async def set_role(
@@ -240,7 +337,11 @@ class Config(commands.GroupCog, name="config", description="Manage server-specif
             return
 
         value = role.id if role else None
-        await self.bot.config_db.set_setting(GuildId(interaction.guild_id), feature.value, value)
+        await self.bot.config_db.set_setting(
+            GuildId(interaction.guild_id),
+            feature.value,
+            value,
+        )
 
         if role:
             await interaction.response.send_message(
@@ -253,7 +354,10 @@ class Config(commands.GroupCog, name="config", description="Manage server-specif
                 ephemeral=True,
             )
 
-    @app_commands.command(name="autodiscover", description="Automatically discover and suggest settings.")
+    @app_commands.command(
+        name="autodiscover",
+        description="Automatically discover and suggest settings.",
+    )
     async def autodiscover(self, interaction: discord.Interaction) -> None:
         """Scan the server and suggest settings based on channel and role names."""
         if not interaction.guild:
@@ -276,7 +380,9 @@ class Config(commands.GroupCog, name="config", description="Manage server-specif
                 found_items.append(setting)
 
         if not found_items:
-            await interaction.followup.send("Couldn't find any channels or roles with common names to suggest.")
+            await interaction.followup.send(
+                "Couldn't find any channels or roles with common names to suggest.",
+            )
             return
 
         description_lines.append("\nDo you want to apply these suggestions?")
@@ -292,20 +398,117 @@ class Config(commands.GroupCog, name="config", description="Manage server-specif
         )
         await interaction.followup.send(embed=embed, view=view)
 
+    # --- Sub-group for Forwarding Config ---
+    forward = app_commands.Group(
+        name="forward",
+        description="Configure message forwarding settings.",
+    )
+
+    @forward.command(
+        name="set-source",
+        description="Set the bot to forward messages from.",
+    )
+    @app_commands.describe(
+        bot="The bot user (e.g., QOTD) whose embeds you want to forward.",
+    )
+    async def set_forward_source(
+        self,
+        interaction: discord.Interaction,
+        bot: discord.User,
+    ) -> None:
+        """Set the source bot for forwarding."""
+        if not interaction.guild_id:
+            return
+
+        if not bot.bot:
+            await interaction.response.send_message(
+                "❌ This must be a bot user.",
+                ephemeral=True,
+            )
+            return
+
+        await self.bot.config_db.set_setting(
+            GuildId(interaction.guild_id),
+            "qotd_source_bot_id",
+            bot.id,
+        )
+        await interaction.response.send_message(
+            f"✅ Embeds from {bot.mention} will now be forwarded.",
+            ephemeral=True,
+        )
+
+    @forward.command(
+        name="set-target",
+        description="Set the channel to forward embeds to.",
+    )
+    @app_commands.describe(
+        channel="The text channel where forwarded embeds should be sent.",
+    )
+    async def set_forward_target(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+    ) -> None:
+        """Set the target channel for forwarding."""
+        if not interaction.guild_id:
+            return
+
+        await self.bot.config_db.set_setting(
+            GuildId(interaction.guild_id),
+            "qotd_target_channel_id",
+            channel.id,
+        )
+        await interaction.response.send_message(
+            f"✅ Embeds will now be forwarded to {channel.mention}.",
+            ephemeral=True,
+        )
+
+    @forward.command(
+        name="disable",
+        description="Disable the message forwarder for this server.",
+    )
+    async def disable_forwarder(self, interaction: discord.Interaction) -> None:
+        """Disable the forwarder by clearing both settings."""
+        await self.bot.config_db.set_setting(
+            GuildId(interaction.guild_id),
+            "qotd_source_bot_id",
+            None,
+        )
+        await self.bot.config_db.set_setting(
+            GuildId(interaction.guild_id),
+            "qotd_target_channel_id",
+            None,
+        )
+        await interaction.response.send_message(
+            "✅ Message forwarding has been disabled for this server.",
+            ephemeral=True,
+        )
+
     # --- Sub-group for Pruning Config ---
-    prune = app_commands.Group(name="prune", description="Configure automatic pruning settings.")
+    prune = app_commands.Group(
+        name="prune",
+        description="Configure automatic pruning settings.",
+    )
 
     @prune.command(
         name="set-days",
         description="Set the number of days of inactivity before pruning roles.",
     )
     @app_commands.describe(days="Number of days (e.g., 14). Must be greater than 0.")
-    async def set_prune_days(self, interaction: discord.Interaction, days: app_commands.Range[int, 1]) -> None:  # ty: ignore [invalid-type-form]
+    async def set_prune_days(
+        self,
+        interaction: discord.Interaction,
+        days: app_commands.Range[int, 1],
+    ) -> None:  # ty: ignore [invalid-type-form]
         """Set the inactivity period for pruning."""
         if not interaction.guild_id:
             return
 
-        await self.bot.config_db.set_setting(GuildId(interaction.guild_id), "inactivity_days", days)
+        await self.bot.config_db.set_setting(
+            GuildId(interaction.guild_id),
+            "inactivity_days",
+            days,
+        )
         await interaction.response.send_message(
             f"✅ Inactive members will now have their roles pruned after **{days}** days.",
             ephemeral=True,
@@ -316,7 +519,11 @@ class Config(commands.GroupCog, name="config", description="Manage server-specif
         description="Add a role to the list of roles to be pruned from inactive members.",
     )
     @app_commands.describe(role="The role to add to the prune list.")
-    async def add_prune_role(self, interaction: discord.Interaction, role: discord.Role) -> None:
+    async def add_prune_role(
+        self,
+        interaction: discord.Interaction,
+        role: discord.Role,
+    ) -> None:
         """Add a role to the prune list."""
         if not interaction.guild_id:
             return
@@ -326,7 +533,10 @@ class Config(commands.GroupCog, name="config", description="Manage server-specif
         current_roles = config.roles_to_prune or []
 
         if role.id in current_roles:
-            await interaction.response.send_message(f"The role {role.mention} is already on the prune list.", ephemeral=True)
+            await interaction.response.send_message(
+                f"The role {role.mention} is already on the prune list.",
+                ephemeral=True,
+            )
             return
 
         current_roles.append(role.id)
@@ -338,7 +548,11 @@ class Config(commands.GroupCog, name="config", description="Manage server-specif
 
     @prune.command(name="remove-role", description="Remove a role from the prune list.")
     @app_commands.describe(role="The role to remove from the prune list.")
-    async def remove_prune_role(self, interaction: discord.Interaction, role: discord.Role) -> None:
+    async def remove_prune_role(
+        self,
+        interaction: discord.Interaction,
+        role: discord.Role,
+    ) -> None:
         """Remove a role from the prune list."""
         if not interaction.guild_id:
             return
@@ -348,7 +562,10 @@ class Config(commands.GroupCog, name="config", description="Manage server-specif
         current_roles = config.roles_to_prune or []
 
         if role.id not in current_roles:
-            await interaction.response.send_message(f"The role {role.mention} is not on the prune list.", ephemeral=True)
+            await interaction.response.send_message(
+                f"The role {role.mention} is not on the prune list.",
+                ephemeral=True,
+            )
             return
 
         current_roles.remove(role.id)

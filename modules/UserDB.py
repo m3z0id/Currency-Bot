@@ -16,6 +16,8 @@ from modules.enums import StatName
 from modules.types import GuildId, NonNegativeInt, PositiveInt, ReminderPreference, UserGuildPair, UserId
 
 if TYPE_CHECKING:
+    import aiosqlite
+
     from modules.Database import Database
     from modules.TransactionsDB import TransactionsDB
 
@@ -54,7 +56,6 @@ class UserDB:
                     CHECK(daily_reminder_preference IN ('NEVER', 'ONCE', 'ALWAYS')),
 
                     has_claimed_daily           INTEGER NOT NULL DEFAULT 0 CHECK(has_claimed_daily IN (0, 1)),
-                    leveling_opt_out            INTEGER NOT NULL DEFAULT 0 CHECK(leveling_opt_out IN (0, 1)),
 
                     -- Keys & Constraints
                     PRIMARY KEY (discord_id, guild_id),
@@ -91,8 +92,7 @@ class UserDB:
                     currency,
                     bumps,
                     xp,
-                    level,
-                    leveling_opt_out
+                    level
                 FROM users;
                 """,
             )
@@ -131,40 +131,6 @@ class UserDB:
                 (user_id, guild_id, preference),
             )
             await conn.commit()
-
-    async def set_leveling_opt_out(
-        self,
-        user_id: UserId,
-        guild_id: GuildId,
-        is_opted_out: bool,
-    ) -> None:
-        """Set the leveling opt-out preference for a user."""
-        async with self.database.get_conn() as conn:
-            await conn.execute(
-                f"""
-                INSERT INTO {self.USERS_TABLE} (discord_id, guild_id, leveling_opt_out) VALUES (?, ?, ?)
-                ON CONFLICT(discord_id, guild_id) DO UPDATE SET leveling_opt_out = excluded.leveling_opt_out
-                """,  # noqa: S608
-                (user_id, guild_id, 1 if is_opted_out else 0),
-            )
-            await conn.commit()
-
-    async def is_user_opted_out(self, user_id: UserId, guild_id: GuildId) -> bool:
-        """Check if a user has opted out of the leveling system."""
-        async with self.database.get_cursor() as cursor:
-            await cursor.execute(
-                f"""
-                SELECT leveling_opt_out FROM {self.USERS_TABLE}
-                WHERE discord_id = ? AND guild_id = ?
-                """,  # noqa: S608
-                (user_id, guild_id),
-            )
-            result = await cursor.fetchone()
-        if result:
-            # result[0] will be 1 if opted out, 0 otherwise
-            return result[0] == 1
-        # Default to not opted out if the user isn't in the table yet
-        return False
 
     async def get_active_users(self, guild_id: GuildId, days: int) -> list[UserId]:
         """Get a list of user IDs that have been active within a specified number of days."""
@@ -270,7 +236,7 @@ class UserDB:
                         WHEN daily_reminder_preference = 'ONCE' THEN 'NEVER'
                         ELSE daily_reminder_preference END
                 WHERE guild_id = ?
-                """,  # noqa: S608
+                """,
                 (guild_id,),
             )
             # Create a partial index to optimize fetching users who need a daily reminder.
@@ -315,7 +281,7 @@ class UserDB:
                     daily_reminder_preference = CASE
                         WHEN daily_reminder_preference = 'ONCE' THEN 'NEVER'
                         ELSE daily_reminder_preference END
-                """,  # noqa: S608
+                """,
             )
             await conn.commit()
             return user_ids_to_remind
@@ -344,8 +310,11 @@ class UserDB:
         guild_id: GuildId,
         stat: StatName,
         amount: PositiveInt,
+        conn: aiosqlite.Connection | None = None,
     ) -> NonNegativeInt:
-        """Atomically increments a user's stat using a positive value and returns the new value."""
+        """Atomically increments a user's stat and returns the new value.
+        If 'conn' is provided, it uses that connection and does not commit.
+        """
         # stat.value is 'currency', 'bumps', or 'xp' which we safely use to build the query
         sql = f"""
             INSERT INTO {self.USERS_TABLE} (discord_id, guild_id, {stat.value})
@@ -354,10 +323,16 @@ class UserDB:
                 {stat.value} = {stat.value} + excluded.{stat.value}
             RETURNING {stat.value}
         """  # noqa: S608
-        async with self.database.get_conn() as conn:
+        if conn:
+            # A connection was passed; use it and do NOT commit.
             cursor = await conn.execute(sql, (user_id, guild_id, amount))
             new_value_row = await cursor.fetchone()
-            await conn.commit()
+        else:
+            # No connection passed; manage our own (old behavior).
+            async with self.database.get_conn() as new_conn:
+                cursor = await new_conn.execute(sql, (user_id, guild_id, amount))
+                new_value_row = await cursor.fetchone()
+                await new_conn.commit()
         return NonNegativeInt(int(new_value_row[0]) if new_value_row else 0)
 
     async def decrement_stat(
@@ -366,8 +341,11 @@ class UserDB:
         guild_id: GuildId,
         stat: StatName,
         amount: PositiveInt,
+        conn: aiosqlite.Connection | None = None,
     ) -> int | None:
-        """Atomically decrements a user's stat if they have sufficient value."""
+        """Atomically decrements a user's stat if they have sufficient value.
+        If 'conn' is provided, it uses that connection and does not commit.
+        """
         # This new method uses a safe UPDATE instead of an UPSERT
         sql = f"""
             UPDATE {self.USERS_TABLE}
@@ -375,10 +353,16 @@ class UserDB:
             WHERE discord_id = ? AND guild_id = ? AND {stat.value} >= ?
             RETURNING {stat.value}
         """  # noqa: S608
-        async with self.database.get_conn() as conn:
+        if conn:
+            # A connection was passed; use it and do NOT commit.
             cursor = await conn.execute(sql, (amount, user_id, guild_id, amount))
             new_value_row = await cursor.fetchone()
-            await conn.commit()
+        else:
+            # No connection passed; manage our own (old behavior).
+            async with self.database.get_conn() as new_conn:
+                cursor = await new_conn.execute(sql, (amount, user_id, guild_id, amount))
+                new_value_row = await cursor.fetchone()
+                await new_conn.commit()
         return int(new_value_row[0]) if new_value_row else None
 
     async def set_stat(
@@ -456,7 +440,6 @@ class UserDB:
     ) -> list[tuple[int, UserId, int]]:
         """Retrieve the top users by a stat."""
         query_stat = "xp" if stat == StatName.XP else stat.value
-        where_clause = "WHERE guild_id = ? AND leveling_opt_out = 0" if stat == StatName.XP else "WHERE guild_id = ?"
 
         async with self.database.get_cursor() as cursor:
             await cursor.execute(
@@ -466,9 +449,9 @@ class UserDB:
                     discord_id,
                     {query_stat}
                 FROM v_user_stats
-                {where_clause}
+                WHERE guild_id = ? AND {query_stat} > 0
                 LIMIT ?
-                """,  # noqa: S608
+                """,
                 (guild_id, limit),
             )
             rows = await cursor.fetchall()

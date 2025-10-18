@@ -332,6 +332,15 @@ class Moderate(commands.Cog):
                 "The configured muted role could not be found on this server. It may have been deleted.",
                 ephemeral=True,
             )
+            await self.bot.log_admin_warning(
+                guild_id=GuildId(interaction.guild.id),
+                warning_type="missing_role",
+                description=(
+                    "The `/moderate mute` command failed because the "
+                    f"configured `muted_role_id` ({muted_role_id}) could not be found."
+                ),
+                level="ERROR",
+            )
             return
 
         if muted_role in member.roles:

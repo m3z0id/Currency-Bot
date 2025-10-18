@@ -1,19 +1,28 @@
 import logging
 import pathlib
-from typing import ClassVar, Final
+import time
+from typing import ClassVar, Final, Literal
 
 import discord
 from discord import Forbidden, HTTPException, MissingApplicationID
 from discord.app_commands import CommandSyncFailure, TranslationError
 from discord.ext import commands
-from discord.ext.commands import ExtensionAlreadyLoaded, ExtensionFailed, ExtensionNotFound, NoEntryPointError
+from discord.ext.commands import (
+    ExtensionAlreadyLoaded,
+    ExtensionFailed,
+    ExtensionNotFound,
+    NoEntryPointError,
+)
 
 from modules.config import BotConfig
 from modules.ConfigDB import ConfigDB
 from modules.Database import Database
 from modules.InvitesDB import InvitesDB
+from modules.server_admin import ServerManager
 from modules.TaskDB import TaskDB
+from modules.trading_logic import TradingLogic
 from modules.TransactionsDB import TransactionsDB
+from modules.types import GuildId
 from modules.UserDB import UserDB
 
 log = logging.getLogger(__name__)
@@ -35,6 +44,9 @@ class KiwiBot(commands.Bot):
             intents=intents,
             help_command=None,
         )
+        self.server_manager: ServerManager | None = None
+        self._warning_cooldowns: dict[str, float] = {}
+        self.trading_logic: TradingLogic | None = None
 
     # Event to notify when the bot has connected
     async def setup_hook(self) -> None:
@@ -48,6 +60,13 @@ class KiwiBot(commands.Bot):
         self.transactions_db = TransactionsDB(self.database)
         self.config_db = ConfigDB(self.database)
 
+        # Initialize TradingLogic if API key is present
+        if self.config.twelvedata_api_key:
+            self.trading_logic = TradingLogic(self.database, self.user_db, self.config.twelvedata_api_key)
+            log.info("TradingLogic initialized.")
+        else:
+            log.warning("TWELVEDATA_API_KEY not set. Paper trading module will be unavailable.")
+
         # AWAIT the post-initialization tasks to ensure tables are created
         # UserDB must be first as other tables have foreign keys to it.
         await self.user_db.post_init()
@@ -55,13 +74,27 @@ class KiwiBot(commands.Bot):
         await self.invites_db.post_init()
         await self.transactions_db.post_init()
         await self.config_db.post_init()
+
+        # Create the portfolios table
+        if self.trading_logic:
+            await self.trading_logic.post_init()
+
         log.info("All database tables initialized.")
+
+        # Initialize the Server Manager if configured
+        if self.config.servers_path:
+            self.server_manager = ServerManager(servers_path=self.config.servers_path)
+            await self.server_manager.__aenter__()  # Start its background tasks
 
         # Now it's safe to load cogs
         try:
             # Add 'cogs.' prefix to the path for loading
             for file in pathlib.Path("cogs/").glob("*.py"):
                 if file.is_file():
+                    # Skip loading paper_trading if logic isn't available
+                    if file.stem == "paper_trading" and not self.trading_logic:
+                        log.warning("Skipping load of cogs.paper_trading: API key not configured.")
+                        continue
                     await self.load_extension(f"cogs.{file.stem}")
                     log.info("Loaded %s", file.stem)
             synced = await self.tree.sync()  # Sync slash commands with Discord
@@ -92,6 +125,79 @@ class KiwiBot(commands.Bot):
 
         log.info("Setup complete.")
 
+    async def log_admin_warning(
+        self,
+        guild_id: GuildId,
+        warning_type: str,
+        description: str,
+        level: Literal["WARN", "ERROR"] = "WARN",
+        cooldown_seconds: int = 3600,
+    ) -> None:
+        """Send a standardized warning to the guild's configured bot warning channel.
+
+        Includes a cooldown to prevent spam.
+        """
+        # 1. Check Cooldown
+        now = time.time()
+        cooldown_key = f"{guild_id}:{warning_type}"
+        if (last_warn_time := self._warning_cooldowns.get(cooldown_key)) and (now - last_warn_time) < cooldown_seconds:
+            return  # Still on cooldown
+
+        # 2. Get Config & Channel
+        try:
+            config = await self.config_db.get_guild_config(guild_id)
+            if not config.bot_warning_channel_id:
+                return  # Feature not configured
+
+            channel = self.get_channel(config.bot_warning_channel_id)
+            if not isinstance(channel, discord.TextChannel):
+                channel = await self.fetch_channel(config.bot_warning_channel_id)
+
+            if not isinstance(channel, discord.TextChannel):
+                log.warning(
+                    "Bot warning channel %d for guild %d not found or not a text channel.",
+                    config.bot_warning_channel_id,
+                    guild_id,
+                )
+                return
+
+        except (discord.NotFound, discord.Forbidden):
+            log.warning(
+                "Could not fetch or send to bot warning channel for guild %d.",
+                guild_id,
+            )
+            return
+        except Exception:
+            log.exception("Error during bot warning channel retrieval.")
+            return
+
+        # 3. Build Embed
+        if level == "ERROR":
+            title = "❌ Bot Error"
+            color = discord.Colour.red()
+        else:
+            title = "⚠️ Bot Warning"
+            color = discord.Colour.orange()
+
+        embed = discord.Embed(
+            title=title,
+            description=description,
+            color=color,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_footer(text=f"Warning Type: {warning_type}")
+
+        # 4. Send Message and Set Cooldown
+        try:
+            await channel.send(embed=embed)
+            self._warning_cooldowns[cooldown_key] = now
+        except (discord.Forbidden, discord.HTTPException):
+            log.exception(
+                "Failed to send message to bot warning channel %d in guild %d",
+                channel.id,
+                guild_id,
+            )
+
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Send a welcome and setup guide when joining a new guild."""
         log.info("Joined new guild: %s (%s)", guild.name, guild.id)
@@ -101,7 +207,7 @@ class KiwiBot(commands.Bot):
         target_channel = guild.system_channel
         if not target_channel or not target_channel.permissions_for(guild.me).send_messages:
             for channel in guild.text_channels:
-                if channel.permissions_for(guild.me).send_messages:
+                if channel.permissions_for(guild.me).send_messages and "staff" in channel.name.lower():
                     target_channel = channel
                     break
 
@@ -112,11 +218,6 @@ class KiwiBot(commands.Bot):
                 color=discord.Colour.green(),
             )
             await target_channel.send(embed=embed)
-
-    async def on_guild_remove(self, guild: discord.Guild) -> None:
-        """Handle data cleanup when the bot is removed from a guild."""
-        log.info("Bot removed from guild: %s (%s). Cleaning up data.", guild.name, guild.id)
-        await self.config_db.on_guild_remove(guild.id)
 
     async def on_error(
         self,
@@ -157,8 +258,7 @@ class KiwiBot(commands.Bot):
 
     async def close(self) -> None:
         """Gracefully close bot resources."""
-        # aiosqlite connections are managed by context managers,
-        # so no explicit database closing is needed here.
-        # This is a good place for other cleanup logic in the future.
+        if self.server_manager:
+            await self.server_manager.__aexit__(None, None, None)  # Ensure graceful shutdown
         log.info("Closing bot gracefully.")
         await super().close()

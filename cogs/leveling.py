@@ -88,7 +88,7 @@ class LeaderboardView(discord.ui.View):
 
 
 class LevelingCog(commands.Cog):
-    """Handles the leveling system, including XP gain, ranks, and leaderboards."""
+    """Handle the leveling system, including XP gain, ranks, and leaderboards."""
 
     # Define the parent group for all leveling commands
     level = app_commands.Group(name="level", description="Commands for the leveling system.")
@@ -186,9 +186,25 @@ class LevelingCog(commands.Cog):
         embed.set_footer(text=f"You need {xp_for_next:,} more XP for the next level.")
         await channel.send(embed=embed)
 
+    async def _is_opted_out(self, member: discord.Member) -> bool:
+        """Check if a member has the XP opt-out role."""
+        config = await self.bot.config_db.get_guild_config(GuildId(member.guild.id))
+        role_id = config.xp_opt_out_role_id
+        if not role_id:
+            return False
+        return member.get_role(role_id) is not None
+
     async def _grant_xp(self, user_id: UserId, guild_id: GuildId, source: str, amount: int) -> None:
         """Check eligibility and grant XP."""
-        if await self.bot.user_db.is_user_opted_out(user_id, guild_id):
+        guild = self.bot.get_guild(guild_id)
+        if not guild:
+            return  # Guild not found
+
+        member = guild.get_member(user_id)
+        if not member:
+            return  # Member not found in guild
+
+        if await self._is_opted_out(member):
             return
 
         # Single atomic call to the enhanced database method
@@ -239,31 +255,88 @@ class LevelingCog(commands.Cog):
         if xp_to_add > 0:
             await self._grant_xp(UserId(user_id), self.privileged_guild_id, "udp", xp_to_add)
 
-    @level.command(name="opt-out", description="Exclude yourself from the leveling system.")
+    @level.command(
+        name="opt-out",
+        description="Exclude yourself from the leveling system by getting the opt-out role.",
+    )
     async def level_opt_out(self, interaction: discord.Interaction) -> None:
-        """Allow a user to opt-out without resetting their XP."""
-        user_id, guild_id = UserId(interaction.user.id), GuildId(interaction.guild.id)
-        if await self.bot.user_db.is_user_opted_out(user_id, guild_id):
-            await interaction.response.send_message("ℹ️ You are already opted out.", ephemeral=True)  # noqa: RUF001
+        """Allow a user to opt-out by gaining the opt-out role."""
+        config = await self.bot.config_db.get_guild_config(GuildId(interaction.guild.id))
+        role_id = config.xp_opt_out_role_id
+
+        if not role_id:
+            await interaction.response.send_message("ℹ️ This server has not configured an XP Opt-Out role.", ephemeral=True)  # noqa: RUF001
             return
 
-        await self.bot.user_db.set_leveling_opt_out(user_id, guild_id, True)
-        # The line resetting XP has been removed to fix the destructive behavior.
-        await interaction.response.send_message(
-            "✅ You are now excluded from the leveling system. Your XP is saved for when you return.",
-            ephemeral=True,
-        )
+        role = interaction.guild.get_role(role_id)
+        if not role:
+            await interaction.response.send_message(
+                "⚠️ The configured XP Opt-Out role no longer exists. Please contact an admin.",
+                ephemeral=True,
+            )
+            await self.bot.log_admin_warning(
+                guild_id=GuildId(interaction.guild.id),
+                warning_type="missing_role",
+                description=(
+                    "The `/level opt-out` command failed because the "
+                    f"configured `xp_opt_out_role_id` ({role_id}) could not be found."
+                ),
+                level="ERROR",
+            )
+            return
 
-    @level.command(name="opt-in", description="Re-include yourself in the leveling system.")
+        if role in interaction.user.roles:
+            await interaction.response.send_message("ℹ️ You already have the XP Opt-Out role.", ephemeral=True)  # noqa: RUF001
+            return
+
+        try:
+            await interaction.user.add_roles(role, reason="User opted out of leveling")
+            await interaction.response.send_message(
+                f"✅ You have been given the {role.mention} role and are now opted out of leveling.",
+                ephemeral=True,
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "⚠️ I do not have permission to assign that role. Please contact an admin.",
+                ephemeral=True,
+            )
+
+    @level.command(
+        name="opt-in",
+        description="Re-include yourself in the leveling system by removing the opt-out role.",
+    )
     async def level_opt_in(self, interaction: discord.Interaction) -> None:
-        """Allow a user to opt back into the leveling system."""
-        user_id, guild_id = UserId(interaction.user.id), GuildId(interaction.guild.id)
-        if not await self.bot.user_db.is_user_opted_out(user_id, guild_id):
+        """Allow a user to opt-in by removing the opt-out role."""
+        config = await self.bot.config_db.get_guild_config(GuildId(interaction.guild.id))
+        role_id = config.xp_opt_out_role_id
+
+        if not role_id:
+            await interaction.response.send_message("ℹ️ This server has not configured an XP Opt-Out role.", ephemeral=True)  # noqa: RUF001
+            return
+
+        role = interaction.guild.get_role(role_id)
+        if not role:
+            await interaction.response.send_message(
+                "⚠️ The configured XP Opt-Out role no longer exists. Please contact an admin.",
+                ephemeral=True,
+            )
+            return
+
+        if role not in interaction.user.roles:
             await interaction.response.send_message("ℹ️ You are already opted in.", ephemeral=True)  # noqa: RUF001
             return
 
-        await self.bot.user_db.set_leveling_opt_out(user_id, guild_id, False)
-        await interaction.response.send_message("✅ Welcome back! You will now gain XP again.", ephemeral=True)
+        try:
+            await interaction.user.remove_roles(role, reason="User opted in to leveling")
+            await interaction.response.send_message(
+                f"✅ The {role.mention} role has been removed. You will now gain XP again.",
+                ephemeral=True,
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "⚠️ I do not have permission to remove that role. Please contact an admin.",
+                ephemeral=True,
+            )
 
     @level.command(name="rank", description="Check your or another user's rank.")
     async def level_rank(self, interaction: discord.Interaction, member: discord.Member | None = None) -> None:
@@ -274,13 +347,6 @@ class LevelingCog(commands.Cog):
 
         if target_user.bot:
             await interaction.response.send_message("Nice try but us bots don't do that.", ephemeral=True)
-            return
-
-        if await self.bot.user_db.is_user_opted_out(UserId(target_user.id), GuildId(interaction.guild.id)):
-            await interaction.response.send_message(
-                f"ℹ️ {target_user.display_name} has opted out of the leveling system.",  # noqa: RUF001
-                ephemeral=ephemeral,
-            )
             return
 
         xp = await self.bot.user_db.get_stat(UserId(target_user.id), guild_id, StatName.XP)
@@ -317,8 +383,11 @@ class LevelingCog(commands.Cog):
         """Show the XP leaderboard.."""
         await interaction.response.defer()
 
-        # This now returns a pre-filtered list, fixing the N+1 query issue.
-        data = await self.bot.user_db.get_leaderboard(GuildId(interaction.guild.id), StatName.XP, limit=200)
+        data = await self.bot.user_db.get_leaderboard(
+            GuildId(interaction.guild.id),
+            StatName.XP,
+            limit=200,
+        )
 
         if not data:
             await interaction.followup.send("The leaderboard is currently empty.")

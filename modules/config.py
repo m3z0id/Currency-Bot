@@ -2,9 +2,10 @@
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Self
 
-from .types import GuildId, UserId
+from .types import ChannelId, GuildId, UserId
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +20,10 @@ class BotConfig:
     guild_id: GuildId | None
     swl_guild_id: GuildId | None
     udp_port: int | None
+    mc_guild_id: GuildId | None
+    game_admin_log_channel_id: ChannelId | None
+    servers_path: Path | None
+    twelvedata_api_key: str | None
 
     @classmethod
     def from_environment(cls) -> Self:
@@ -40,6 +45,17 @@ class BotConfig:
                 raise KeyError(msg)
             return None
 
+        def get_path(name: str) -> Path | None:
+            """Safely get an environment variable as a Path object."""
+            val = os.getenv(name)
+            if not val:
+                return None
+
+            if not Path(val).exists():
+                return None
+
+            return Path(val)
+
         token = os.getenv("TOKEN")
         if not token:
             msg = "Required environment variable 'TOKEN' is not set."
@@ -52,4 +68,11 @@ class BotConfig:
             guild_id=(GuildId(val) if (val := get_env_int("UDP_GUILD_ID", required=False)) else None),
             swl_guild_id=(GuildId(val) if (val := get_env_int("SWL_GUILD_ID", required=False)) else None),
             udp_port=get_env_int("UDP_PORT", required=False),
+            # Game Admin cog settings
+            mc_guild_id=(GuildId(val) if (val := get_env_int("MC_GUILD_ID", required=False)) else None),
+            game_admin_log_channel_id=(
+                ChannelId(val) if (val := get_env_int("GAME_ADMIN_LOG_CHANNEL_ID", required=False)) else None
+            ),
+            servers_path=get_path("SERVERS_PATH"),
+            twelvedata_api_key=os.getenv("TWELVEDATA_API_KEY"),
         )

@@ -3,18 +3,14 @@
 import logging
 import re
 from collections import defaultdict
-from typing import TYPE_CHECKING, TypedDict, cast, override
+from typing import TypedDict, cast, override
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from modules.types import AnalysisStatus, MessageId, is_guild_message
-
-if TYPE_CHECKING:
-    from modules.KiwiBot import KiwiBot
-else:
-    KiwiBot = commands.Bot
+from modules.KiwiBot import KiwiBot
+from modules.types import AnalysisStatus, GuildId, MessageId, is_guild_message
 
 # A structured dictionary for analysis results, improving code clarity.
 
@@ -198,7 +194,10 @@ class ReactionRoles(commands.Cog):
         message_id = MessageId(payload.message_id)
         if message_id in self.analysis_cache:
             del self.analysis_cache[message_id]
-            log.info("Invalidated reaction role cache for edited message ID %s.", payload.message_id)
+            log.info(
+                "Invalidated reaction role cache for edited message ID %s.",
+                payload.message_id,
+            )
 
     @commands.Cog.listener()
     @override
@@ -283,8 +282,22 @@ class ReactionRoles(commands.Cog):
                         target_role.name,
                         member.display_name,
                     )
+                    await self.bot.log_admin_warning(
+                        guild_id=GuildId(guild.id),
+                        warning_type="reaction_role_permission",
+                        description=(
+                            f"I failed to assign/remove the reaction role {target_role.mention} "
+                            f"for {member.mention}.\n\n"
+                            "**Reason**: `discord.Forbidden`. This is a role hierarchy "
+                            f"problem. Please ensure my bot role is higher than the `{target_role.name}` role."
+                        ),
+                        level="ERROR",
+                    )
                 except discord.HTTPException:
-                    log.exception("Network error while modifying role for '%s'", member.display_name)
+                    log.exception(
+                        "Network error while modifying role for '%s'",
+                        member.display_name,
+                    )
 
                 # Found our match, no need to check other lines.
                 break

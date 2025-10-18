@@ -58,7 +58,7 @@ class InvitesCog(commands.Cog):
         await self.recache_all_invites()
 
     @commands.Cog.listener()
-    async def on_member_join(self, member: discord.Member) -> None:  # noqa: PLR0912
+    async def on_member_join(self, member: discord.Member) -> None:
         """Handle new members joining the server and finds the inviter by diffing invite uses."""
         # This logic now runs for all guilds, not just the privileged one.
         if member.bot:
@@ -86,21 +86,27 @@ class InvitesCog(commands.Cog):
 
         except discord.Forbidden:
             log.warning("Missing 'Manage Server' permissions for guild %d.", member.guild.id)
-            if alert_channel_id:
-                alert_channel = self.bot.get_channel(alert_channel_id)
-                if alert_channel:
-                    await alert_channel.send(
-                        f"⚠️ I don't have permission to view server invites to track who invited {member.mention}.",
-                    )
+            await self.bot.log_admin_warning(
+                guild_id=GuildId(member.guild.id),
+                warning_type="invite_permission",
+                description=(
+                    "I am missing the `Manage Server` permission. "
+                    "I cannot track who is inviting new members until this is granted."
+                ),
+                level="WARN",
+            )
             return
         except discord.HTTPException:
             log.exception("HTTP error fetching invites.")
-            if alert_channel_id:
-                alert_channel = self.bot.get_channel(alert_channel_id)
-                if alert_channel:
-                    await alert_channel.send(
-                        f"⚠️ An API error occurred while trying to find the inviter for {member.mention}.",
-                    )
+            await self.bot.log_admin_warning(
+                guild_id=GuildId(member.guild.id),
+                warning_type="invite_api_fail",
+                description=(
+                    f"An API error occurred while trying to find the inviter for {member.mention}. "
+                    "This is likely a temporary Discord issue."
+                ),
+                level="ERROR",
+            )
             return
 
         # Determine the inviter's ID, defaulting to None if not found.

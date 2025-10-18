@@ -22,7 +22,7 @@ COOLDOWN: Final[int] = 3600 * 6  # 6 hours
 
 # Restricted to guild
 @app_commands.guilds(GUILD)
-class Sell(commands.Cog):
+class Harvest(commands.Cog):
     LIMBS: Final[tuple[str, ...]] = (
         "Left Arm",
         "Right Arm",
@@ -51,9 +51,11 @@ class Sell(commands.Cog):
         """Verify that the command is used in the correct guild.
 
         Args:
+        ----
             ctx: The command context.
 
         Returns:
+        -------
             True if the guild is correct, otherwise False.
 
         """
@@ -69,8 +71,9 @@ class Sell(commands.Cog):
         """Handle the sale/harvest logic.
 
         Args:
+        ----
             ctx: The command context.
-            item: The specific item to sell/harvest, or None to choose randomly.
+            item: The specific item to take/harvest, or None to choose randomly.
             item_list: The tuple of available items.
             action_name: The name of the action being performed.
 
@@ -114,15 +117,15 @@ class Sell(commands.Cog):
             ctx.author.display_name,
         )
 
-    @commands.hybrid_command(name="sell", description="Sell one of wndx2's limbs")
+    @commands.hybrid_command(name="take", description="Take one of wndx2's limbs")
     @commands.cooldown(1, COOLDOWN, commands.BucketType.user)
-    @app_commands.describe(limb="Limb to sell")
+    @app_commands.describe(limb="Limb to take")
     @app_commands.choices(
         limb=[app_commands.Choice(name=limb, value=limb.lower()) for limb in LIMBS],
     )
-    async def sell(self, ctx: commands.Context, limb: str | None = None) -> None:
-        """Sell a limb."""
-        await self._process_sale(ctx, limb, self.LIMBS, "sell")
+    async def take(self, ctx: commands.Context, limb: str | None = None) -> None:
+        """Take a limb."""
+        await self._process_sale(ctx, limb, self.LIMBS, "take")
 
     @commands.hybrid_command(
         name="harvest",
@@ -140,4 +143,4 @@ class Sell(commands.Cog):
 
 async def setup(bot: KiwiBot) -> None:
     """Set up the cog."""
-    await bot.add_cog(Sell(bot))
+    await bot.add_cog(Harvest(bot))

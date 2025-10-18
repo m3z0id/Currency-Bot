@@ -54,6 +54,16 @@ class ServerStats(commands.Cog):
                     )
                 except (discord.Forbidden, discord.HTTPException):
                     log.exception("Failed to update member count for guild %s", guild.name)
+                    await self.bot.log_admin_warning(
+                        guild_id=GuildId(guild.id),
+                        warning_type="serverstats_fail",
+                        description=(
+                            f"I failed to update the Member Count channel ({member_channel.mention}).\n\n"
+                            "**Reason**: `discord.Forbidden` or `discord.HTTPException`. "
+                            "Please check my permissions in that channel (must have `Manage Channel` and `Connect`)."
+                        ),
+                        level="ERROR",
+                    )
 
         # 4. Update Tag Role Count Channel
         if isinstance(tag_channel, discord.VoiceChannel) and tag_role:
@@ -69,6 +79,16 @@ class ServerStats(commands.Cog):
                     )
                 except (discord.Forbidden, discord.HTTPException):
                     log.exception("Failed to update tag role count for guild %s", guild.name)
+                    await self.bot.log_admin_warning(
+                        guild_id=GuildId(guild.id),
+                        warning_type="serverstats_fail",
+                        description=(
+                            f"I failed to update the Tag Role Count channel ({tag_channel.mention}).\n\n"
+                            "**Reason**: `discord.Forbidden` or `discord.HTTPException`. "
+                            "Please check my permissions in that channel (must have `Manage Channel` and `Connect`)."
+                        ),
+                        level="ERROR",
+                    )
 
 
 async def setup(bot: KiwiBot) -> None:

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, ClassVar, Self
 if TYPE_CHECKING:
     from modules.Database import Database
 
-    from .types import ChannelId, GuildId, RoleId, RoleIdList
+    from .types import ChannelId, GuildId, RoleId, RoleIdList, UserId
 
 log = logging.getLogger(__name__)
 
@@ -31,9 +31,13 @@ class GuildConfig:
     mod_log_channel_id: ChannelId | None = None
     join_leave_log_channel_id: ChannelId | None = None
     level_up_channel_id: ChannelId | None = None
+    bot_warning_channel_id: ChannelId | None = None
     bumper_role_id: RoleId | None = None
     backup_bumper_role_id: RoleId | None = None
     muted_role_id: RoleId | None = None
+    verified_role_id: RoleId | None = None
+    automute_role_id: RoleId | None = None
+    xp_opt_out_role_id: RoleId | None = None
     roles_to_prune: RoleIdList | None = None
     # Server Stats
     member_count_channel_id: ChannelId | None = None
@@ -43,6 +47,9 @@ class GuildConfig:
     inactivity_days: int = 14
     custom_role_prefix: str = "Custom: "
     custom_role_prune_days: int = 30
+    # QOTD Forwarder
+    qotd_source_bot_id: UserId | None = None
+    qotd_target_channel_id: ChannelId | None = None
 
     @classmethod
     def from_row(cls, row: tuple) -> Self:
@@ -86,11 +93,15 @@ class ConfigDB:
                     mod_log_channel_id      INTEGER CHECK(mod_log_channel_id > 1000000),
                     join_leave_log_channel_id INTEGER CHECK(join_leave_log_channel_id > 1000000),
                     level_up_channel_id     INTEGER CHECK(level_up_channel_id > 1000000),
+                    bot_warning_channel_id  INTEGER CHECK(bot_warning_channel_id > 1000000),
 
                     -- Configurable Role IDs (Nullable)
                     bumper_role_id          INTEGER CHECK(bumper_role_id > 1000000),
                     backup_bumper_role_id   INTEGER CHECK(backup_bumper_role_id > 1000000),
                     muted_role_id           INTEGER CHECK(muted_role_id > 1000000),
+                    verified_role_id        INTEGER CHECK(verified_role_id > 1000000),
+                    automute_role_id        INTEGER CHECK(automute_role_id > 1000000),
+                    xp_opt_out_role_id      INTEGER CHECK(xp_opt_out_role_id > 1000000),
 
                     -- Server Stats Channel/Role IDs (Nullable)
                     member_count_channel_id INTEGER CHECK(member_count_channel_id > 1000000),
@@ -103,7 +114,10 @@ class ConfigDB:
 
                     -- Other Settings with Defaults
                     custom_role_prefix      TEXT NOT NULL DEFAULT 'Custom: ',
-                    custom_role_prune_days  INTEGER NOT NULL DEFAULT 30 CHECK(custom_role_prune_days > 0)
+                    custom_role_prune_days  INTEGER NOT NULL DEFAULT 30 CHECK(custom_role_prune_days > 0),
+
+                    qotd_source_bot_id      INTEGER CHECK(qotd_source_bot_id > 1000000),
+                    qotd_target_channel_id  INTEGER CHECK(qotd_target_channel_id > 1000000)
 
                 ) STRICT, WITHOUT ROWID;
                 """,
