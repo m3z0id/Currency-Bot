@@ -32,6 +32,9 @@ type Price = float
 # --- Logging ---
 log = logging.getLogger(__name__)
 
+# --- Choices for App Commands ---
+ALLOWED_TICKER_CHOICES = [app_commands.Choice(name=ticker, value=ticker) for ticker in sorted(ALLOWED_STOCKS)]
+
 
 # --- Discord Cog ---
 @app_commands.guild_only()
@@ -75,7 +78,12 @@ class PaperTradingCog(commands.Cog):
         # Add the new error types to the list of "safe" errors
         if isinstance(
             error,
-            InsufficientFundsError | PortfolioNotFoundError | PriceNotAvailableError | ValueError,
+            (
+                InsufficientFundsError,
+                PortfolioNotFoundError,
+                PriceNotAvailableError,  # Added
+                ValueError,
+            ),
         ):
             await target.send(f"❌ Error: {error}", ephemeral=ephemeral)
         elif isinstance(error, commands.CommandError):
@@ -93,24 +101,17 @@ class PaperTradingCog(commands.Cog):
 
     # --- Commands ---
     @commands.hybrid_command(name="buy", description="Buy shares of a stock.")
-    @app_commands.describe(ticker="Symbol (e.g., TQQQ).", quantity="Number of shares.")
-    async def buy(self, ctx: commands.Context, ticker: str, quantity: float) -> None:
+    @app_commands.choices(ticker=ALLOWED_TICKER_CHOICES)
+    @app_commands.describe(ticker="Symbol (e.g., TQQQ).", amount="The dollar amount to invest.")
+    async def buy(
+        self,
+        ctx: commands.Context,
+        ticker: str,
+        amount: commands.Range[int, 1],  # ty: ignore [invalid-type-form]
+    ) -> None:
         """Handle the buy command, calling middleware."""
         guild_id = await self._ensure_guild_context(ctx)
         if not guild_id:
-            return
-
-        if ticker.upper() not in ALLOWED_STOCKS:
-            supported_tickers = ", ".join(sorted(ALLOWED_STOCKS))
-            await ctx.send(
-                f"❌ **Invalid Symbol:** `{ticker.upper()}` is not a supported ticker.\n"
-                f"Please choose from: `{supported_tickers}`",
-                ephemeral=True,
-            )
-            return
-
-        if quantity <= 0:
-            await ctx.send("Quantity must be positive.", ephemeral=True)
             return
 
         try:
@@ -118,39 +119,41 @@ class PaperTradingCog(commands.Cog):
                 user_id=ctx.author.id,
                 guild_id=guild_id,
                 ticker=ticker,
-                quantity=quantity,
                 order_type="buy",
+                amount=amount,
             )
+            # Calculate quantity from the amount and filled price for the response
+            bought_quantity = amount / filled_price
+
             response_content = (
-                f"✅ **BOUGHT** {quantity} {ticker.upper()} @ **${filled_price:.2f}**\n(Price as of {format_dt(timestamp, 'R')})\n"
-                f"Total Cost: ${quantity * filled_price:.2f}\n"
-                f"New Cash Balance: ${new_balance:.2f}"
+                f"✅ **BOUGHT** {bought_quantity:,.2f} {ticker.upper()} @ **${filled_price:,.2f}**\n"
+                f"(Price as of {format_dt(timestamp, 'R')})\n"
+                f"Total Cost: ${amount:,.2f}\n"
+                f"New Cash Balance: ${new_balance}"
             )
+
+            if not self.trading_logic.is_market_open():
+                response_content += "\n\n⚠️ **Note: The market is closed. Trade executed at the last available price.**"
+
             await ctx.send(response_content, ephemeral=True)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             await self._handle_trading_errors(ctx, e)
 
     @commands.hybrid_command(name="sell", description="Sell shares of a stock.")
-    @app_commands.describe(ticker="Symbol you own (e.g., AAPL).", quantity="Number of shares.")
+    @app_commands.choices(ticker=ALLOWED_TICKER_CHOICES)
+    @app_commands.describe(ticker="Symbol you own (e.g., TQQQ).", quantity="Number of shares.")
     async def sell(self, ctx: commands.Context, ticker: str, quantity: float) -> None:
         """Handle the sell command, calling middleware."""
         guild_id = await self._ensure_guild_context(ctx)
         if not guild_id:
             return
 
-        # --- ADD THIS VALIDATION BLOCK ---
-        if ticker.upper() not in ALLOWED_STOCKS:
-            supported_tickers = ", ".join(sorted(ALLOWED_STOCKS))
-            await ctx.send(
-                f"❌ **Invalid Symbol:** `{ticker.upper()}` is not a supported ticker.\n"
-                f"Please choose from: `{supported_tickers}`",
-                ephemeral=True,
-            )
-            return
-        # --- END VALIDATION BLOCK ---
-        if quantity <= 0:
-            await ctx.send("Quantity must be positive.", ephemeral=True)
+        # Round input quantity to 2 decimals
+        quantity = round(quantity, 2)
+
+        if quantity < 0.01:
+            await ctx.send("Quantity must be at least 0.01.", ephemeral=True)
             return
 
         try:
@@ -158,17 +161,23 @@ class PaperTradingCog(commands.Cog):
                 user_id=ctx.author.id,
                 guild_id=guild_id,
                 ticker=ticker,
-                quantity=quantity,
                 order_type="sell",
+                quantity=quantity,
             )
+            credit_amount = quantity * filled_price
             response_content = (
-                f"✅ **SOLD** {quantity} {ticker.upper()} @ **${filled_price:.2f}**\n(Price as of {format_dt(timestamp, 'R')})\n"
-                f"Total Credit: ${quantity * filled_price:.2f}\n"
+                f"✅ **SOLD** {quantity:,.2f} {ticker.upper()} @ **${filled_price:,.2f}**\n"
+                f"(Price as of {format_dt(timestamp, 'R')})\n"
+                f"Total Credit: ${credit_amount:,.2f}\n"
                 f"New Cash Balance: ${new_balance:.2f}"
             )
+
+            if not self.trading_logic.is_market_open():
+                response_content += "\n\n⚠️ **Note: The market is closed. Trade executed at the last available price.**"
+
             await ctx.send(response_content, ephemeral=True)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             await self._handle_trading_errors(ctx, e)
 
     @commands.hybrid_command(name="price", description="Get the cached prices of all supported stocks.")
@@ -176,7 +185,7 @@ class PaperTradingCog(commands.Cog):
         """Handle the price command, reading all prices from the cache."""
         try:
             # 1. Ensure the cache is fresh for all tickers
-            await self.trading_logic.ensure_cache_is_fresh()
+            await self.trading_logic.price_cache.get_fresh_prices()
 
             price_list_lines = []
             last_update_time = None  # To show in the footer
@@ -186,7 +195,7 @@ class PaperTradingCog(commands.Cog):
 
             for ticker in sorted_tickers:
                 # Get price from the local cache
-                price_data = await self.trading_logic.get_cached_stock_price(ticker)
+                price_data = self.trading_logic.price_cache.get_cached_price(ticker)
 
                 if price_data[0] is not None and price_data[1] is not None:
                     current_price, timestamp = price_data
@@ -203,15 +212,17 @@ class PaperTradingCog(commands.Cog):
                 description="\n".join(price_list_lines),
             )
 
+            market_status = "Market is OPEN" if self.trading_logic.is_market_open() else "Market is CLOSED"
+
             if last_update_time:
                 # Format the timestamp relative to the user
-                embed.set_footer(text=f"Prices as of: {format_dt(last_update_time, 'R')}")
+                embed.set_footer(text=f"🇺🇸 {market_status} | Prices as of: {format_dt(last_update_time, 'R')}")
             else:
-                embed.set_footer(text="Prices are currently unavailable.")
+                embed.set_footer(text=f"🇺🇸 {market_status} | Prices are currently unavailable.")
 
             await ctx.send(embed=embed, ephemeral=True)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             # Use the existing error handler
             await self._handle_trading_errors(ctx, e)
 
@@ -256,7 +267,7 @@ class PaperTradingCog(commands.Cog):
                     qty = pos["quantity"]
                     mkt_val_str = f"${pos['market_value']:.2f}" if pos["market_value"] is not None else "N/A"
                     pnl_str = f"${pos['pnl']:+.2f}" if pos["pnl"] is not None else "N/A"
-                    holdings_str += f"**{ticker}**: {qty} shares | Val: {mkt_val_str} | P&L: {pnl_str}\n"
+                    holdings_str += f"**{ticker}**: {qty:.2f} shares | Val: {mkt_val_str} | P&L: {pnl_str}\n"
             else:
                 holdings_str = "No current holdings."
 
@@ -265,12 +276,12 @@ class PaperTradingCog(commands.Cog):
                 value=holdings_str[:1020] + ("..." if len(holdings_str) > 1024 else ""),
                 inline=False,
             )
-            # Add footer to explain cached prices
-            # embed.set_footer(text=f"Values based on cached prices, refreshed every {self.trading_logic.CACHE_TTL}s.")
+            market_status = "Market is OPEN" if self.trading_logic.is_market_open() else "Market is CLOSED"
+            embed.set_footer(text=f"🇺🇸 {market_status} | Values based on most recent cached prices.")
 
             await ctx.send(embed=embed, ephemeral=True)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             await self._handle_trading_errors(ctx, e)
 
     @stocks.command(name="list", description="List all tradable stocks and their descriptions.")
@@ -284,48 +295,48 @@ class PaperTradingCog(commands.Cog):
 
         embed.add_field(
             name="1. Broad Market Long: TQQQ (NASDAQ)",
-            value="TQQQ is a **3× leveraged ETF** that seeks to deliver three times the daily return of the NASDAQ-100 index. It represents a bullish position on large-cap technology and growth stocks. Because of daily compounding, it is generally suited for **short- to medium-term trades**, not long-term holding.",  # noqa: E501
+            value="TQQQ is a **3× leveraged ETF** that seeks to deliver three times the daily return of the NASDAQ-100 index. It represents a bullish position on large-cap technology and growth stocks. Because of daily compounding, it is generally suited for **short- to medium-term trades**, not long-term holding.",  # noqa: RUF001, E501
             inline=False,
         )
         embed.add_field(
             name="2. Broad Market Short: SQQQ (NASDAQ)",
-            value="SQQQ is the inverse counterpart to TQQQ, offering **–3× the daily performance** of the NASDAQ-100. It allows traders to profit from or hedge against market declines in major tech-driven indices. Like all leveraged ETFs, it is primarily designed for **short-term tactical positioning**.",  # noqa: E501
+            value="SQQQ is the inverse counterpart to TQQQ, offering **–3× the daily performance** of the NASDAQ-100. It allows traders to profit from or hedge against market declines in major tech-driven indices. Like all leveraged ETFs, it is primarily designed for **short-term tactical positioning**.",  # noqa: RUF001, E501
             inline=False,
         )
         embed.add_field(
             name="3. Small Cap: TNA",
-            value="TNA provides **3× daily exposure** to the Russell 2000 Index, which tracks smaller U.S. companies. Small-cap stocks tend to be more sensitive to economic cycles, making TNA useful for traders expecting **domestic growth acceleration** or a shift toward riskier assets.",  # noqa: E501
+            value="TNA provides **3× daily exposure** to the Russell 2000 Index, which tracks smaller U.S. companies. Small-cap stocks tend to be more sensitive to economic cycles, making TNA useful for traders expecting **domestic growth acceleration** or a shift toward riskier assets.",  # noqa: RUF001, E501
             inline=False,
         )
         embed.add_field(
             name="4. Sector Long: SOXL (Semiconductors)",
-            value="SOXL delivers **3× daily returns** of a semiconductor industry index. This sector underpins much of the modern economy — powering everything from smartphones to AI systems. Traders use SOXL to express a **high-conviction view on tech hardware growth**.",  # noqa: E501
+            value="SOXL delivers **3× daily returns** of a semiconductor industry index. This sector underpins much of the modern economy — powering everything from smartphones to AI systems. Traders use SOXL to express a **high-conviction view on tech hardware growth**.",  # noqa: RUF001, E501
             inline=False,
         )
         embed.add_field(
             name="5. Sector Short: FAZ (Financials)",
-            value="FAZ provides **–3× daily returns** of an index tracking major U.S. financial institutions. It allows for speculation or hedging against **weakness in the banking or credit sectors**, often used during periods of tightening monetary policy or financial stress.",  # noqa: E501
+            value="FAZ provides **–3× daily returns** of an index tracking major U.S. financial institutions. It allows for speculation or hedging against **weakness in the banking or credit sectors**, often used during periods of tightening monetary policy or financial stress.",  # noqa: RUF001, E501
             inline=False,
         )
         embed.add_field(
             name="6. Bonds: TMF",
-            value="TMF offers **3× daily exposure** to long-term U.S. Treasury bonds. It typically benefits when **interest rates fall** or investors move toward safe assets. Traders often use TMF as a **diversifier or defensive position** during equity downturns.",  # noqa: E501
+            value="TMF offers **3× daily exposure** to long-term U.S. Treasury bonds. It typically benefits when **interest rates fall** or investors move toward safe assets. Traders often use TMF as a **diversifier or defensive position** during equity downturns.",  # noqa: RUF001, E501
             inline=False,
         )
         embed.add_field(
             name="7. Gold: UGL",
-            value="UGL tracks **2× the daily performance** of gold bullion prices. It serves as a leveraged way to gain exposure to **precious metals as a hedge** against inflation, currency weakness, or market volatility.",  # noqa: E501
+            value="UGL tracks **2× the daily performance** of gold bullion prices. It serves as a leveraged way to gain exposure to **precious metals as a hedge** against inflation, currency weakness, or market volatility.",  # noqa: RUF001, E501
             inline=False,
         )
         embed.add_field(
             name="8. Bitcoin: BITX",
-            value="BITX provides **2× daily exposure** to the price of Bitcoin. It captures the volatility and momentum of the cryptocurrency market, making it suitable for **short-term speculative trades** on digital assets rather than long-term investment.",  # noqa: E501
+            value="BITX provides **2× daily exposure** to the price of Bitcoin. It captures the volatility and momentum of the cryptocurrency market, making it suitable for **short-term speculative trades** on digital assets rather than long-term investment.",  # noqa: RUF001, E501
             inline=False,
         )
 
         embed.set_footer(text="Use /price <ticker> to get the latest cached price.")
 
-        await interaction.send(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # --- Cog Setup Function ---

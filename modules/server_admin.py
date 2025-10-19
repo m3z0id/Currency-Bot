@@ -101,7 +101,6 @@ class ServerManager:
         """Initialize the ServerManager.
 
         Args:
-        ----
             servers_path: The absolute path to the parent directory containing all server folders.
             refresh_interval_seconds: How often to automatically refresh the server list.
             log_max_age_days: Servers with logs older than this will be ignored.
@@ -327,7 +326,7 @@ class ServerManager:
             port = int(props.get("server-port", 0))
             if not port:
                 msg = "server-port is missing or invalid."
-                raise PropertiesError(msg)  # noqa: TRY301
+                raise PropertiesError(msg)
 
             is_online = await self._is_port_open(ip, port)
             status = ServerStatus.ONLINE if is_online else ServerStatus.OFFLINE
@@ -351,8 +350,8 @@ class ServerManager:
         try:
             proc = await asyncio.create_subprocess_shell(
                 cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,  # ty: ignore error[unresolved-attribute]
+                stderr=asyncio.subprocess.PIPE,  # ty: ignore error[unresolved-attribute]
             )
             _stdout, stderr = await asyncio.wait_for(
                 proc.communicate(),
@@ -364,7 +363,7 @@ class ServerManager:
             msg = f"Command timed out: {cmd}"
             raise CommandTimeoutError(msg, stderr.decode()) from err
 
-        if proc.returncode != 0:
+        if proc.returncode != 0 and proc.returncode is not None:
             msg = f"Command failed with exit code {proc.returncode}: {cmd}"
             raise CommandExecutionError(
                 msg,

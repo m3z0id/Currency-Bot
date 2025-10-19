@@ -4,9 +4,12 @@ from __future__ import annotations  # Defer type annotation evaluation
 
 import json
 import logging
-from typing import Any, Self  # Self requires Python 3.11+
+from typing import TYPE_CHECKING, Any, Self  # Self requires Python 3.11+
 
 import aiohttp  # Ensure aiohttp is installed: pip install aiohttp
+
+if TYPE_CHECKING:
+    import types
 
 # --- Type Hinting Setup ---
 type Ticker = str
@@ -72,7 +75,7 @@ class AioTwelveDataClient:
         self,
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
-        exc_tb: (Any | None),  # TracebackType requires types-aiobotocore etc. Use Any for simplicity
+        exc_tb: types.TracebackType | None,
     ) -> None:
         """Exit the async context manager, closing the session if owned."""
         if self._owns_session and self._session:
@@ -87,7 +90,7 @@ class AioTwelveDataClient:
         endpoint: str,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Makes an asynchronous request to the Twelve Data API."""
+        """Make an asynchronous request to the Twelve Data API."""
         if self._session is None:
             # Should ideally be used within an 'async with' block, but handle direct call
             # This is less efficient as it creates/closes a session per call
@@ -104,7 +107,7 @@ class AioTwelveDataClient:
         endpoint: str,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Internal method to perform the actual request logic."""
+        """Perform the actual request logic."""
         url = f"{self.BASE_URL}{endpoint}"
         req_params = params.copy() if params else {}
         req_params["apikey"] = self._api_key
@@ -157,16 +160,16 @@ class AioTwelveDataClient:
             msg = "API request timed out."
             raise AioTwelveDataRequestError(msg) from e
         except aiohttp.ClientConnectionError as e:
-            log.exception("API connection error: %s %s - %s", method, url, e)
+            log.exception("API connection error: %s %s", method, url)
             msg = f"Could not connect to API: {e}"
             raise AioTwelveDataRequestError(msg) from e
         except (aiohttp.ContentTypeError, json.JSONDecodeError) as e:
-            log.exception("Failed to decode API JSON response: %s", e)
+            log.exception("Failed to decode API JSON response")
             msg = "Invalid JSON response received from API."
             raise AioTwelveDataError(msg) from e
         except Exception as e:
             # Catch any other unexpected errors during the request process
-            log.exception("Unexpected error during API request: %s", e)
+            log.exception("Unexpected error during API request")
             msg = f"An unexpected error occurred during the API request: {e}"
             raise AioTwelveDataError(
                 msg,
@@ -253,15 +256,14 @@ class AioTwelveDataClient:
                 # Cannot reliably map prices, return None for all
 
         # Handle broader request errors (ConnectionError, InvalidTickerError if 400 applies to *all* symbols, etc.)
-        except (AioTwelveDataRequestError, AioTwelveDataApiError) as e:
-            log.exception("Failed to fetch batch prices for (%s): %s", symbol_param, e)
+        except (AioTwelveDataRequestError, AioTwelveDataApiError):
+            log.exception("Failed to fetch batch prices for (%s)", symbol_param)
             # Depending on the error, you might want to raise it or just return None for all
             # For now, we return the map with Nones as initialized
-        except Exception as e:
+        except Exception:
             log.exception(
-                "Unexpected error during batch price fetch for (%s): %s",
+                "Unexpected error during batch price fetch for (%s)",
                 symbol_param,
-                e,
             )  # TRY400
             # Return the map with Nones
 

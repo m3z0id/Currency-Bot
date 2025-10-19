@@ -1,20 +1,18 @@
 # In modules/trading_logic.py
-# Using Python 3.13+ features
 from __future__ import annotations  # Defer type annotation evaluation
 
 import asyncio
 import datetime
 import logging
 from typing import TYPE_CHECKING, Final
+from zoneinfo import ZoneInfo
 
 from modules.types import PositiveInt
 
-# --- Third-Party Imports ---
-# Removed: from twelvedata import TDClient
-# Removed: from twelvedata.exceptions import BadRequestError, InvalidApiKeyError, TwelveDataError
-
 # --- Local Imports ---
 if TYPE_CHECKING:
+    from aiosqlite import Connection
+
     from modules.Database import Database
     from modules.types import GuildId, UserId
     from modules.UserDB import UserDB
@@ -45,6 +43,83 @@ ALLOWED_STOCKS: Final[set[Ticker]] = {
 }
 # Time-To-Live for cached prices in seconds
 CACHE_TTL: Final[int] = 600  # 10 minutes
+NY_TZ: Final[ZoneInfo] = ZoneInfo("America/New_York")
+
+
+class PriceCache:
+    """Manages fetching and caching of stock prices with a single lock."""
+
+    def __init__(self, api_client: AioTwelveDataClient) -> None:
+        self.api_client = api_client
+        self._lock = asyncio.Lock()
+        self._prices: dict[Ticker, Price] = {}
+        self._timestamps: dict[Ticker, datetime.datetime] = {}
+        self._last_refresh = datetime.datetime.min.replace(tzinfo=datetime.UTC)
+
+    def is_us_market_open(self) -> bool:
+        """Check if the US market is (conservatively) open."""
+        # Get the current time in New York
+        now_et = datetime.datetime.now(NY_TZ)
+
+        # 1. Check for weekends (Monday=0, Sunday=6)
+        if now_et.weekday() >= 5:
+            return False  # It's Saturday or Sunday
+
+        # 2. Define market hours in ET
+        market_open_time = datetime.time(9, 30)
+        market_close_time = datetime.time(16, 0)
+
+        # 3. Check if current time is within market hours
+        # This conservatively ignores pre-market/after-hours
+        return market_open_time <= now_et.time() <= market_close_time
+
+    async def get_fresh_prices(self) -> dict[Ticker, Price]:
+        """Return a dictionary of fresh prices, refreshing from the API if stale."""
+        async with self._lock:
+            now_utc = datetime.datetime.now(datetime.UTC)  # Use UTC for comparison
+
+            # 1. Check all conditions
+            is_stale = (now_utc - self._last_refresh).total_seconds() > CACHE_TTL
+            is_empty = not self._prices
+            market_is_open = self.is_us_market_open()
+
+            # 2. Decide whether to refresh
+            # REFRESH IF:
+            #   (A) The bot just started (cache is empty)
+            #   (B) The market is open AND our cache TTL has expired
+            if is_empty or (market_is_open and is_stale):
+                log.info(
+                    "Refreshing price cache. Reason: %s",
+                    "Cache is empty" if is_empty else "Cache is stale and market is open",
+                )
+
+                try:
+                    price_map = await self.api_client.get_batch_prices(ALLOWED_STOCKS)
+                    update_time = datetime.datetime.now(datetime.UTC)
+
+                    for ticker, price in price_map.items():
+                        if price is not None:
+                            self._prices[ticker.upper()] = price
+                            self._timestamps[ticker.upper()] = update_time
+
+                    self._last_refresh = update_time
+                    log.info("Full batch refresh complete.")
+
+                except (AioTwelveDataError, AioTwelveDataRequestError) as e:
+                    log.exception("Batch refresh API error")
+                    msg = "Could not refresh prices. The data provider may be unavailable."
+                    # If the cache is empty, we must raise. Otherwise, we can
+                    # serve stale data to avoid failing all /price commands.
+                    if is_empty:
+                        raise ConnectionError(msg) from e
+                    log.warning("Serving stale prices due to API error.")
+
+            # 3. Always return the current cache state
+            return self._prices
+
+    def get_cached_price(self, ticker: Ticker) -> tuple[Price, datetime.datetime] | tuple[None, None]:
+        """Get a single price and its timestamp directly from the cache."""
+        return self._prices.get(ticker), self._timestamps.get(ticker)
 
 
 # --- Custom Exceptions (can be shared or defined here) ---
@@ -62,8 +137,9 @@ class PriceNotAvailableError(Exception):
 
 # --- Middleware Class ---
 class TradingLogic:
-    """Handles interactions with the trading data API and database.
-    Manages a local cache of prices and a set of known tickers to
+    """Handle interactions with the trading data API and database.
+
+    Manage a local cache of prices and a set of known tickers to
     respect API rate limits.
     """
 
@@ -78,20 +154,8 @@ class TradingLogic:
         self.database = database
         self.user_db = user_db
         self.api_client = AioTwelveDataClient(api_key=api_key)
-        log.info("TradingLogic initialized with AioTwelveDataClient.")
-
-        # --- Caching & State ---
-        self.global_price_cache: dict[Ticker, Price] = {}
-        self.global_price_cache_timestamps: dict[Ticker, datetime.datetime] = {}
-        self.last_cache_refresh_time: datetime.datetime = datetime.datetime.min.replace(
-            tzinfo=datetime.UTC,
-        )
-
-        # --- Concurrency Locks ---
-        # Protects concurrent access to the ticker set and price caches
-        self.cache_lock = asyncio.Lock()
-        # Simple lock to ensure only one user-facing API call (lookup) happens at a time
-        self.api_rate_limit_lock = asyncio.Lock()
+        self.price_cache = PriceCache(self.api_client)
+        log.info("TradingLogic initialized with PriceCache and AioTwelveDataClient.")
 
     async def post_init(self) -> None:
         """Initialize the database table for portfolios."""
@@ -118,7 +182,7 @@ class TradingLogic:
         """Retrieve all of a user's holdings from the database."""
         async with self.database.get_cursor() as cursor:
             await cursor.execute(
-                f"SELECT ticker, quantity, avg_cost FROM {self.TABLE_NAME} WHERE user_id = ? AND guild_id = ?",
+                f"SELECT ticker, quantity, avg_cost FROM {self.TABLE_NAME} WHERE user_id = ? AND guild_id = ?",  # noqa: S608
                 (user_id, guild_id),
             )
             rows = await cursor.fetchall()
@@ -132,89 +196,129 @@ class TradingLogic:
             for row in rows
         ]
 
-    # --- NEW: Cache & API Wrappers ---
-
-    async def get_cached_stock_price(
-        self,
-        ticker: Ticker,
-    ) -> tuple[Price, datetime.datetime] | tuple[None, None]:
-        """Fetches the latest price for a ticker *from the local cache*.
-        Does NOT make an API call.
-        """
-        ticker = ticker.upper()
-        async with self.cache_lock:
-            price = self.global_price_cache.get(ticker)
-            timestamp = self.global_price_cache_timestamps.get(ticker)
-
-        if price is not None and timestamp is not None:
-            # The timestamp here is for the individual ticker, which is fine.
-            # The global refresh time is what triggers the update.
-            return price, timestamp
-        return None, None
-
-    async def ensure_cache_is_fresh(self) -> None:
-        """Gatekeeper method. Ensures the price cache is fresh (<= 10 min old) before
-        allowing any price-dependent operation to proceed. This is the only method
-        that makes API calls.
-        """
-        now = datetime.datetime.now(datetime.UTC)
-        is_stale = (now - self.last_cache_refresh_time).total_seconds() > CACHE_TTL
-
-        if not is_stale:
-            return
-
-        log.info("Global price cache is stale. Acquiring lock for batch refresh...")
-        async with self.api_rate_limit_lock:
-            # Double-check staleness inside the lock to prevent stampedes
-            now = datetime.datetime.now(datetime.UTC)
-            if (now - self.last_cache_refresh_time).total_seconds() <= CACHE_TTL:
-                log.info("Cache was refreshed by another task. Proceeding.")
-                return
-
-            # We hold the lock and the cache is confirmed stale. Refresh all 8 tickers.
-            log.info(
-                "Performing full batch refresh for %d tickers...",
-                len(ALLOWED_STOCKS),
-            )
-            try:
-                # Directly use the ALLOWED_STOCKS constant for the API call
-                price_map = await self.api_client.get_batch_prices(ALLOWED_STOCKS)
-                update_time = datetime.datetime.now(datetime.UTC)
-
-                async with self.cache_lock:
-                    for ticker, price in price_map.items():
-                        self.global_price_cache[ticker.upper()] = price
-                        self.global_price_cache_timestamps[ticker.upper()] = update_time
-
-                self.last_cache_refresh_time = update_time
-                log.info("Full batch refresh complete.")
-
-            except (AioTwelveDataError, AioTwelveDataRequestError) as e:
-                log.exception("Batch refresh API error: %s", e)
-                msg = "Could not refresh prices. The data provider may be unavailable."
-                raise ConnectionError(msg) from e
-
     # --- Financial Engine / Simulation Logic ---
+    async def _execute_buy_order(
+        self,
+        conn: Connection,
+        user_id: UserId,
+        guild_id: GuildId,
+        ticker: Ticker,
+        amount: PositiveInt,
+        current_price: Price,
+    ) -> None:
+        """Execute the database operations for a buy order. (Must be run inside a transaction)."""
+        cost = amount
+        # Round the new shares to 2 decimal places
+        new_shares = round(cost / current_price, 2)
+
+        # 1. Atomically decrement cash and check for sufficient funds
+        cursor = await conn.execute(
+            f"""UPDATE {self.user_db.USERS_TABLE} SET currency = currency - ?
+WHERE discord_id = ? AND guild_id = ? AND currency >= ?""",  # noqa: S608
+            (cost, user_id, guild_id, cost),
+        )
+        if cursor.rowcount == 0:
+            msg = f"Insufficient funds. You need ${cost:.2f} to make this purchase."
+            raise InsufficientFundsError(msg)
+
+        # 2. Fetch existing holding to calculate new average cost in Python
+        cursor = await conn.execute(
+            f"SELECT quantity, avg_cost FROM {self.TABLE_NAME} WHERE user_id = ? AND guild_id = ? AND ticker = ?",  # noqa: S608
+            (user_id, guild_id, ticker),
+        )
+        row = await cursor.fetchone()
+        old_qty, old_avg_cost = (row[0], row[1]) if row else (0.0, 0.0)
+
+        # 3. Calculate new average cost in Python
+        total_cost = (old_avg_cost * old_qty) + (current_price * new_shares)
+        total_shares = old_qty + new_shares
+        # Explicitly round the final total shares
+        total_shares = round(total_shares, 2)
+        new_avg_cost = total_cost / total_shares if total_shares > 0 else 0.0
+
+        # 4. UPSERT the holding with the new calculated values
+        await conn.execute(
+            f"""INSERT INTO {self.TABLE_NAME} (user_id, guild_id, ticker, quantity, avg_cost)
+                           VALUES (?, ?, ?, ?, ?)
+                           ON CONFLICT(user_id, guild_id, ticker) DO UPDATE SET
+                               quantity = ?,
+                               avg_cost = ?
+                        """,  # noqa: S608
+            (
+                user_id,
+                guild_id,
+                ticker,
+                total_shares,
+                new_avg_cost,
+                total_shares,  # For the UPDATE part of the UPSERT
+                new_avg_cost,  # For the UPDATE part of the UPSERT
+            ),
+        )
+
+    async def _execute_sell_order(
+        self,
+        conn: Connection,
+        user_id: UserId,
+        guild_id: GuildId,
+        ticker: Ticker,
+        quantity: Quantity,
+        current_price: Price,
+    ) -> None:
+        """Execute the database operations for a sell order. (Must be run inside a transaction)."""
+        credit = PositiveInt(int(quantity * current_price))
+
+        # 1. Get current holding to validate sale
+        cursor = await conn.execute(
+            f"SELECT quantity FROM {self.TABLE_NAME} WHERE user_id = ? AND guild_id = ? AND ticker = ?",  # noqa: S608
+            (user_id, guild_id, ticker),
+        )
+        row = await cursor.fetchone()
+
+        current_quantity = row[0] if row else 0.0
+        if not row or current_quantity < quantity:
+            msg = f"Cannot sell {quantity} shares of {ticker}. Only owns {current_quantity}."
+            raise ValueError(msg)
+
+        # 2. Update or Delete from 'user_holdings' table
+        new_qty = round(current_quantity - quantity, 2)
+        if new_qty < 0.01:  # Check if quantity is less than one cent's worth of a share
+            await conn.execute(
+                f"DELETE FROM {self.TABLE_NAME} WHERE user_id = ? AND guild_id = ? AND ticker = ?",  # noqa: S608
+                (user_id, guild_id, ticker),
+            )
+        else:
+            await conn.execute(
+                f"UPDATE {self.TABLE_NAME} SET quantity = ? WHERE user_id = ? AND guild_id = ? AND ticker = ?",  # noqa: S608
+                (new_qty, user_id, guild_id, ticker),
+            )
+        # 3. Increment cash
+        await conn.execute(
+            f"UPDATE {self.user_db.USERS_TABLE} SET currency = currency + ? WHERE discord_id = ? AND guild_id = ?",  # noqa: S608
+            (credit, user_id, guild_id),
+        )
+
     async def execute_trade(
         self,
         user_id: UserId,
         guild_id: GuildId,
         ticker: Ticker,
-        quantity: Quantity,
         order_type: str,
+        *,
+        quantity: Quantity | None = None,
+        amount: PositiveInt | None = None,
     ) -> tuple[Price, Price, datetime.datetime]:
-        """Handles the logic for executing a buy or sell order using cached prices."""
+        """Execute a buy or sell order using cached prices."""
         ticker = ticker.upper()
 
-        # Gatekeeper: Ensure cache is fresh before proceeding.
-        await self.ensure_cache_is_fresh()
-
-        # --- NEW: Price & Ticker Validation ---
-        # 1. Get price from cache. After the gatekeeper, we know it's fresh.
-        current_price, timestamp = await self.get_cached_stock_price(ticker)
+        # 1. Get fresh prices from the encapsulated cache
+        price_map = await self.price_cache.get_fresh_prices()
+        current_price, timestamp = (
+            price_map.get(ticker),
+            self.price_cache.get_cached_price(ticker)[1],
+        )
 
         if current_price is None:
-            # This now means the ticker is invalid, delisted, or was just added
+            # This now means the ticker is invalid, delisted, or the refresh failed.
             # via /lookup and the subsequent refresh failed to find it.
             log.warning(
                 "Trade rejected: User %s tried to trade %s, but its price is not in the cache.",
@@ -224,124 +328,46 @@ class TradingLogic:
             msg = f"Trade rejected: {ticker} is not a supported trading symbol."
             raise PriceNotAvailableError(msg)
 
-        log.info(
-            "Executing trade for %s @ cached price $%.2f (from %s)",
-            ticker,
-            current_price,
-            timestamp,
-        )
-        cost = PositiveInt(int(quantity * current_price))
-        # --- End Price Validation ---
-
         # Get a single connection for the entire transaction
         async with self.database.get_conn() as conn:
             try:
+                # 2. Dispatch to the correct helper
                 if order_type == "buy":
-                    # 1. Decrement cash using UserDB's encapsulated method
-                    new_balance_val = await self.user_db.decrement_stat(
-                        user_id,
-                        guild_id,
-                        StatName.CURRENCY,
-                        cost,
-                        conn=conn,
-                    )
-
-                    if new_balance_val is None:
-                        # The decrement failed (insufficient funds)
-                        current_cash = await self.user_db.get_stat(
-                            user_id,
-                            guild_id,
-                            StatName.CURRENCY,
-                        )
-                        msg = f"Insufficient funds. Needs ${cost:.2f}, has ${current_cash:.2f}."
-                        raise InsufficientFundsError(msg)
-
-                    # 2. Get current holding (logic for its own table)
-                    cursor = await conn.execute(
-                        f"SELECT quantity, avg_cost FROM {self.TABLE_NAME} WHERE user_id = ? AND guild_id = ? AND ticker = ?",
-                        (user_id, guild_id, ticker),
-                    )
-                    row = await cursor.fetchone()
-
-                    if row:
-                        current_qty, current_avg_cost = row
-                        new_qty = current_qty + quantity
-                        new_avg_cost = ((current_avg_cost * current_qty) + cost) / new_qty
-                    else:
-                        new_qty = quantity
-                        new_avg_cost = current_price
-
-                    # 3. UPSERT the 'user_holdings' table (logic for its own table)
-                    await conn.execute(
-                        f"""INSERT INTO {self.TABLE_NAME} (user_id, guild_id, ticker, quantity, avg_cost)
-                           VALUES (?, ?, ?, ?, ?)
-                           ON CONFLICT(user_id, guild_id, ticker) DO UPDATE SET
-                           quantity = ?, avg_cost = ?
-                        """,
-                        (
-                            user_id,
-                            guild_id,
-                            ticker,
-                            new_qty,
-                            new_avg_cost,
-                            new_qty,
-                            new_avg_cost,
-                        ),
-                    )
-
-                elif order_type == "sell":
-                    # 1. Get current holding to validate sale
-                    cursor = await conn.execute(
-                        f"SELECT quantity FROM {self.TABLE_NAME} WHERE user_id = ? AND guild_id = ? AND ticker = ?",
-                        (user_id, guild_id, ticker),
-                    )
-                    row = await cursor.fetchone()
-
-                    current_quantity = row[0] if row else 0.0
-                    if not row or current_quantity < quantity:
-                        msg = f"Cannot sell {quantity} shares of {ticker}. Only owns {current_quantity}."
+                    if amount is None:
+                        msg = "Buy orders must specify an amount."
                         raise ValueError(msg)
-
-                    new_qty = current_quantity - quantity
-
-                    # 2. Increment cash using UserDB's encapsulated method
-                    new_balance_val = await self.user_db.increment_stat(
-                        user_id,
-                        guild_id,
-                        StatName.CURRENCY,
-                        cost,
-                        conn=conn,
-                    )
-
-                    # 3. Update or Delete from 'user_holdings' table
-                    if abs(new_qty) < 1e-3:  # Check for near-zero float
-                        await conn.execute(
-                            f"DELETE FROM {self.TABLE_NAME} WHERE user_id = ? AND guild_id = ? AND ticker = ?",
-                            (user_id, guild_id, ticker),
-                        )
-                    else:
-                        await conn.execute(
-                            f"UPDATE {self.TABLE_NAME} SET quantity = ? WHERE user_id = ? AND guild_id = ? AND ticker = ?",
-                            (new_qty, user_id, guild_id, ticker),
-                        )
+                    await self._execute_buy_order(conn, user_id, guild_id, ticker, amount, current_price)
+                elif order_type == "sell":
+                    if quantity is None:
+                        msg = "Sell orders must specify a quantity."
+                        raise ValueError(msg)
+                    await self._execute_sell_order(conn, user_id, guild_id, ticker, quantity, current_price)
                 else:
                     msg = "Invalid order_type specified."
                     raise ValueError(msg)
 
-                # 4. Commit the single, atomic transaction
+                # 3. Commit the single, atomic transaction
                 await conn.commit()
                 log.info(
                     "Trade committed for user %s: %s %s %s @ $%.2f",
                     user_id,
                     order_type.upper(),
-                    quantity,
+                    quantity if order_type == "sell" else amount,  # Log amount for buy, qty for sell
                     ticker,
                     current_price,
                 )
 
-                # 5. Get the final cash balance to return it
-                # Note: new_balance_val is already the correct new balance
-                return current_price, new_balance_val, timestamp
+                # 4. Get the final cash balance to return it
+                cursor = await conn.execute(
+                    f"SELECT currency FROM {self.user_db.USERS_TABLE} WHERE discord_id = ? AND guild_id = ?",  # noqa: S608
+                    (user_id, guild_id),
+                )
+                new_balance_row = await cursor.fetchone()
+                return (
+                    current_price,
+                    new_balance_row[0] if new_balance_row else 0,
+                    timestamp,
+                )
 
             except Exception:
                 await conn.rollback()
@@ -349,15 +375,19 @@ class TradingLogic:
                 raise
 
     # --- Other Business Logic (e.g., portfolio P&L calculation) ---
+    def is_market_open(self) -> bool:
+        """Pass-through check to see if the US market is currently open."""
+        return self.price_cache.is_us_market_open()
+
     async def calculate_portfolio_value(
         self,
         user_id: UserId,
         guild_id: GuildId,
     ) -> dict | None:
-        """Calculates the current market value and P&L of a user's portfolio
-        using ONLY cached prices.
-        """
-        await self.ensure_cache_is_fresh()
+        """Calculate the current cached market value and P&L of a user's portfolio."""
+        # This ensures the cache is fresh before we read from it.
+        await self.price_cache.get_fresh_prices()
+
         holdings = await self.fetch_holdings(user_id, guild_id)
 
         # Fetch cash from UserDB, the single source of truth
@@ -380,7 +410,7 @@ class TradingLogic:
             total_cost_basis += cost_basis
 
             # Get price from cache
-            current_price, _ = await self.get_cached_stock_price(ticker)
+            current_price, _ = self.price_cache.get_cached_price(ticker)
 
             if current_price is not None:
                 market_value = quantity * current_price

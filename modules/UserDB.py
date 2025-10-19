@@ -16,8 +16,6 @@ from modules.enums import StatName
 from modules.types import GuildId, NonNegativeInt, PositiveInt, ReminderPreference, UserGuildPair, UserId
 
 if TYPE_CHECKING:
-    import aiosqlite
-
     from modules.Database import Database
     from modules.TransactionsDB import TransactionsDB
 
@@ -236,7 +234,7 @@ class UserDB:
                         WHEN daily_reminder_preference = 'ONCE' THEN 'NEVER'
                         ELSE daily_reminder_preference END
                 WHERE guild_id = ?
-                """,
+                """,  # noqa: S608
                 (guild_id,),
             )
             # Create a partial index to optimize fetching users who need a daily reminder.
@@ -281,7 +279,7 @@ class UserDB:
                     daily_reminder_preference = CASE
                         WHEN daily_reminder_preference = 'ONCE' THEN 'NEVER'
                         ELSE daily_reminder_preference END
-                """,
+                """,  # noqa: S608
             )
             await conn.commit()
             return user_ids_to_remind
@@ -310,11 +308,8 @@ class UserDB:
         guild_id: GuildId,
         stat: StatName,
         amount: PositiveInt,
-        conn: aiosqlite.Connection | None = None,
     ) -> NonNegativeInt:
-        """Atomically increments a user's stat and returns the new value.
-        If 'conn' is provided, it uses that connection and does not commit.
-        """
+        """Atomically increments a user's stat and returns the new value."""
         # stat.value is 'currency', 'bumps', or 'xp' which we safely use to build the query
         sql = f"""
             INSERT INTO {self.USERS_TABLE} (discord_id, guild_id, {stat.value})
@@ -323,16 +318,12 @@ class UserDB:
                 {stat.value} = {stat.value} + excluded.{stat.value}
             RETURNING {stat.value}
         """  # noqa: S608
-        if conn:
-            # A connection was passed; use it and do NOT commit.
+
+        async with self.database.get_conn() as conn:
             cursor = await conn.execute(sql, (user_id, guild_id, amount))
             new_value_row = await cursor.fetchone()
-        else:
-            # No connection passed; manage our own (old behavior).
-            async with self.database.get_conn() as new_conn:
-                cursor = await new_conn.execute(sql, (user_id, guild_id, amount))
-                new_value_row = await cursor.fetchone()
-                await new_conn.commit()
+            await conn.commit()
+
         return NonNegativeInt(int(new_value_row[0]) if new_value_row else 0)
 
     async def decrement_stat(
@@ -341,28 +332,20 @@ class UserDB:
         guild_id: GuildId,
         stat: StatName,
         amount: PositiveInt,
-        conn: aiosqlite.Connection | None = None,
     ) -> int | None:
-        """Atomically decrements a user's stat if they have sufficient value.
-        If 'conn' is provided, it uses that connection and does not commit.
-        """
-        # This new method uses a safe UPDATE instead of an UPSERT
+        """Atomically decrements a user's stat if they have sufficient value."""
         sql = f"""
             UPDATE {self.USERS_TABLE}
             SET {stat.value} = {stat.value} - ?
             WHERE discord_id = ? AND guild_id = ? AND {stat.value} >= ?
             RETURNING {stat.value}
         """  # noqa: S608
-        if conn:
-            # A connection was passed; use it and do NOT commit.
+
+        async with self.database.get_conn() as conn:
             cursor = await conn.execute(sql, (amount, user_id, guild_id, amount))
             new_value_row = await cursor.fetchone()
-        else:
-            # No connection passed; manage our own (old behavior).
-            async with self.database.get_conn() as new_conn:
-                cursor = await new_conn.execute(sql, (amount, user_id, guild_id, amount))
-                new_value_row = await cursor.fetchone()
-                await new_conn.commit()
+            await conn.commit()
+
         return int(new_value_row[0]) if new_value_row else None
 
     async def set_stat(
@@ -451,7 +434,7 @@ class UserDB:
                 FROM v_user_stats
                 WHERE guild_id = ? AND {query_stat} > 0
                 LIMIT ?
-                """,
+                """,  # noqa: S608
                 (guild_id, limit),
             )
             rows = await cursor.fetchall()

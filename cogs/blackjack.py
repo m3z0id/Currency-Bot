@@ -120,7 +120,7 @@ class BlackjackView(discord.ui.View):
         else:  # Player's turn
             self.add_item(HitButton())
             self.add_item(StandButton())
-            if len(self.player.hand) == 2 and not self.player.split:  # noqa: PLR2004
+            if len(self.player.hand) == 2 and not self.player.split:
                 self.add_item(SurrenderButton())
             if self.player.can_double_down:
                 self.add_item(DoubleDownButton())

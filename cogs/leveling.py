@@ -228,7 +228,7 @@ class LevelingCog(commands.Cog):
             return
 
         # Short message filter from original implementation
-        if len(set(message.clean_content.lower()).intersection(lowercase_letters)) <= 3:  # noqa: PLR2004
+        if len(set(message.clean_content.lower()).intersection(lowercase_letters)) <= 3:
             return
 
         xp_to_add = self._get_addable_xp(UserId(message.author.id), GuildId(message.guild.id))

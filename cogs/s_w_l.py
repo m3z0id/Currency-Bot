@@ -51,11 +51,9 @@ class Harvest(commands.Cog):
         """Verify that the command is used in the correct guild.
 
         Args:
-        ----
             ctx: The command context.
 
         Returns:
-        -------
             True if the guild is correct, otherwise False.
 
         """
@@ -71,7 +69,6 @@ class Harvest(commands.Cog):
         """Handle the sale/harvest logic.
 
         Args:
-        ----
             ctx: The command context.
             item: The specific item to take/harvest, or None to choose randomly.
             item_list: The tuple of available items.

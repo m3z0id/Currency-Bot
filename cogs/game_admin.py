@@ -336,7 +336,7 @@ class GameAdmin(commands.Cog):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
-        if isinstance(original, ServerNotFoundError | ServerStateError | RCONConnectionError):
+        if isinstance(original, (ServerNotFoundError, ServerStateError, RCONConnectionError)):
             # These are "safe" errors to show the user
             await interaction.followup.send(f"⚠️ {original}")
         elif isinstance(original, CommandExecutionError):

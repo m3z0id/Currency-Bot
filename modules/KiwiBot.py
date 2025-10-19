@@ -7,12 +7,7 @@ import discord
 from discord import Forbidden, HTTPException, MissingApplicationID
 from discord.app_commands import CommandSyncFailure, TranslationError
 from discord.ext import commands
-from discord.ext.commands import (
-    ExtensionAlreadyLoaded,
-    ExtensionFailed,
-    ExtensionNotFound,
-    NoEntryPointError,
-)
+from discord.ext.commands import ExtensionAlreadyLoaded, ExtensionFailed, ExtensionNotFound, NoEntryPointError
 
 from modules.config import BotConfig
 from modules.ConfigDB import ConfigDB
@@ -62,10 +57,16 @@ class KiwiBot(commands.Bot):
 
         # Initialize TradingLogic if API key is present
         if self.config.twelvedata_api_key:
-            self.trading_logic = TradingLogic(self.database, self.user_db, self.config.twelvedata_api_key)
+            self.trading_logic = TradingLogic(
+                self.database,
+                self.user_db,
+                self.config.twelvedata_api_key,
+            )
             log.info("TradingLogic initialized.")
         else:
-            log.warning("TWELVEDATA_API_KEY not set. Paper trading module will be unavailable.")
+            log.warning(
+                "TWELVEDATA_API_KEY not set. Paper trading module will be unavailable.",
+            )
 
         # AWAIT the post-initialization tasks to ensure tables are created
         # UserDB must be first as other tables have foreign keys to it.
@@ -93,7 +94,9 @@ class KiwiBot(commands.Bot):
                 if file.is_file():
                     # Skip loading paper_trading if logic isn't available
                     if file.stem == "paper_trading" and not self.trading_logic:
-                        log.warning("Skipping load of cogs.paper_trading: API key not configured.")
+                        log.warning(
+                            "Skipping load of cogs.paper_trading: API key not configured.",
+                        )
                         continue
                     await self.load_extension(f"cogs.{file.stem}")
                     log.info("Loaded %s", file.stem)
@@ -239,7 +242,7 @@ class KiwiBot(commands.Bot):
     ) -> None:
         """Log unhandled command exceptions."""
         try:
-            raise error  # noqa: TRY301
+            raise error
         except commands.CommandNotFound:
             pass  # Ignore commands that don't exist
         except commands.CommandOnCooldown as e:
@@ -259,6 +262,10 @@ class KiwiBot(commands.Bot):
     async def close(self) -> None:
         """Gracefully close bot resources."""
         if self.server_manager:
-            await self.server_manager.__aexit__(None, None, None)  # Ensure graceful shutdown
+            await self.server_manager.__aexit__(
+                None,
+                None,
+                None,
+            )  # Ensure graceful shutdown
         log.info("Closing bot gracefully.")
         await super().close()

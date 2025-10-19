@@ -498,7 +498,7 @@ class Config(
     async def set_prune_days(
         self,
         interaction: discord.Interaction,
-        days: app_commands.Range[int, 1],
+        days: app_commands.Range[int, 1],  # ty: ignore [invalid-type-form]
     ) -> None:  # ty: ignore [invalid-type-form]
         """Set the inactivity period for pruning."""
         if not interaction.guild_id:
