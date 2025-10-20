@@ -1,17 +1,24 @@
-# In modules/trading_logic.py
+"""Backend for handling trades.
+
+There's an intentional design decision.
+UserDB manages currency in dollars. But stock prices are in cents.
+We restrict stock quantities to two decimal places.
+And the rounding error of quantity * stock price is the slippage.
+We communicate this slippage as a "transaction fee".
+(While misleading it doubles as a subtle money sink.)
+"""
+
 from __future__ import annotations  # Defer type annotation evaluation
 
 import asyncio
 import datetime
 import logging
-from typing import TYPE_CHECKING, Final
-from zoneinfo import ZoneInfo
-
-from modules.types import PositiveInt
+import math
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 # --- Local Imports ---
 if TYPE_CHECKING:
-    from aiosqlite import Connection
+    import aiosqlite
 
     from modules.Database import Database
     from modules.types import GuildId, UserId
@@ -23,17 +30,15 @@ from modules.enums import StatName
 
 # --- Type Hinting Setup ---
 type Ticker = str
-type Quantity = int | float
-type Price = float
 
 # --- Logging ---
 log = logging.getLogger(__name__)
+
 
 # --- Constants ---
 # Tier 1: Only allowed stocks given rate limit
 ALLOWED_STOCKS: Final[set[Ticker]] = {
     "TQQQ",
-    "SQQQ",
     "TNA",
     "SOXL",
     "FAZ",
@@ -42,83 +47,180 @@ ALLOWED_STOCKS: Final[set[Ticker]] = {
     "BITX",
 }
 # Time-To-Live for cached prices in seconds
-CACHE_TTL: Final[int] = 600  # 10 minutes
-NY_TZ: Final[ZoneInfo] = ZoneInfo("America/New_York")
+CACHE_TTL: Final[int] = 300  # 5 minutes
+
+
+def _parse_api_time(time_str: str) -> datetime.timedelta | None:
+    """Parse 'HH:MM:SS' into a timedelta."""
+    if not time_str or time_str == "00:00:00":
+        return None
+
+    try:
+        # Use strptime to parse the time string
+        t = datetime.datetime.strptime(time_str, "%H:%M:%S").time()  # noqa: DTZ007
+        # Convert the time object to a timedelta
+        return datetime.timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
+    except ValueError:
+        # This catches any format mismatches
+        log.warning("Could not parse API time string: %s", time_str)
+        return None
 
 
 class PriceCache:
-    """Manages fetching and caching of stock prices with a single lock."""
+    """Manage fetching and caching of stock prices on-demand.
+
+    Using an intelligent, market-aware TTL.
+    """
 
     def __init__(self, api_client: AioTwelveDataClient) -> None:
         self.api_client = api_client
-        self._lock = asyncio.Lock()
-        self._prices: dict[Ticker, Price] = {}
+        self._lock = asyncio.Lock()  # Protects against simultaneous refreshes
+        # Store prices as Decimals
+        self._prices: dict[Ticker, float] = {}
         self._timestamps: dict[Ticker, datetime.datetime] = {}
-        self._last_refresh = datetime.datetime.min.replace(tzinfo=datetime.UTC)
+
+        # Refresh with an "intelligent TTL"
+        self._next_check_time = datetime.datetime.min.replace(tzinfo=datetime.UTC)
+
+        # Caches the *actual* market state from the API
+        self._market_state: dict[str, Any] | None = None
 
     def is_us_market_open(self) -> bool:
-        """Check if the US market is (conservatively) open."""
-        # Get the current time in New York
-        now_et = datetime.datetime.now(NY_TZ)
+        """Check the *cached* market state. This is a synchronous, 0-cost check of the last known state."""
+        if not self._market_state:
+            return False  # Default to closed if we've never checked
+        return self._market_state.get("is_market_open", False)
 
-        # 1. Check for weekends (Monday=0, Sunday=6)
-        if now_et.weekday() >= 5:
-            return False  # It's Saturday or Sunday
+    async def get_fresh_prices(self) -> dict[Ticker, float]:  # noqa: PLR0912 PLR0915
+        """Return a dictionary of fresh prices.
 
-        # 2. Define market hours in ET
-        market_open_time = datetime.time(9, 30)
-        market_close_time = datetime.time(16, 0)
-
-        # 3. Check if current time is within market hours
-        # This conservatively ignores pre-market/after-hours
-        return market_open_time <= now_et.time() <= market_close_time
-
-    async def get_fresh_prices(self) -> dict[Ticker, Price]:
-        """Return a dictionary of fresh prices, refreshing from the API if stale."""
+        Refreshing from the API *only* if the intelligent TTL has expired.
+        """
         async with self._lock:
-            now_utc = datetime.datetime.now(datetime.UTC)  # Use UTC for comparison
-
-            # 1. Check all conditions
-            is_stale = (now_utc - self._last_refresh).total_seconds() > CACHE_TTL
+            now_utc = datetime.datetime.now(datetime.UTC)
             is_empty = not self._prices
-            market_is_open = self.is_us_market_open()
 
-            # 2. Decide whether to refresh
-            # REFRESH IF:
-            #   (A) The bot just started (cache is empty)
-            #   (B) The market is open AND our cache TTL has expired
-            if is_empty or (market_is_open and is_stale):
-                log.info(
-                    "Refreshing price cache. Reason: %s",
-                    "Cache is empty" if is_empty else "Cache is stale and market is open",
+            # 1. Fast Path: Serve cache if our intelligent TTL hasn't expired
+            if now_utc < self._next_check_time and not is_empty:
+                log.debug(
+                    "Serving cached prices; next check scheduled for %s",
+                    self._next_check_time,
                 )
+                return self._prices
 
+            # 2. Slow Path: Cache is stale or empty. We MUST check market state.
+            log.info(
+                "Triggering cache refresh. Reason: %s",
+                "Cache is empty" if is_empty else "Intelligent TTL expired",
+            )
+
+            # --- API Call 1: Market State (Uses 1 API credit) ---
+            market_state = await self.api_client.get_market_state("NASDAQ")
+
+            if market_state is None:
+                # API call failed.
+                log.error("Failed to fetch market state. Cannot refresh prices.")
+                # Set a short retry window
+                self._next_check_time = now_utc + datetime.timedelta(minutes=1)
+                if is_empty:
+                    msg = "Failed to fetch initial market state. Bot cannot get prices."
+                    raise ConnectionError(msg)
+                # Serve stale data as a fallback
+                log.warning("Serving stale prices due to market state API failure.")
+                return self._prices
+
+            # Save the new state
+            self._market_state = market_state
+            is_open = self._market_state.get("is_market_open", False)
+
+            # 3. Decide action based on market state
+            if is_open:
+                # --- MARKET IS OPEN ---
+                # We must refresh prices
+                log.info("Market is OPEN. Refreshing batch prices.")
+                # --- API Call 2: Batch Prices (Uses 7 API credits) ---
                 try:
                     price_map = await self.api_client.get_batch_prices(ALLOWED_STOCKS)
                     update_time = datetime.datetime.now(datetime.UTC)
 
-                    for ticker, price in price_map.items():
-                        if price is not None:
-                            self._prices[ticker.upper()] = price
+                    for ticker, price_float in price_map.items():
+                        if price_float is not None:
+                            self._prices[ticker.upper()] = price_float
                             self._timestamps[ticker.upper()] = update_time
-
-                    self._last_refresh = update_time
                     log.info("Full batch refresh complete.")
+
+                    # Set the standard 5-minute TTL
+                    self._next_check_time = update_time + datetime.timedelta(
+                        seconds=CACHE_TTL,
+                    )
 
                 except (AioTwelveDataError, AioTwelveDataRequestError) as e:
                     log.exception("Batch refresh API error")
-                    msg = "Could not refresh prices. The data provider may be unavailable."
-                    # If the cache is empty, we must raise. Otherwise, we can
-                    # serve stale data to avoid failing all /price commands.
+                    # Set a short retry window
+                    self._next_check_time = now_utc + datetime.timedelta(minutes=1)
                     if is_empty:
+                        msg = "Could not refresh prices. The data provider may be unavailable."
                         raise ConnectionError(msg) from e
-                    log.warning("Serving stale prices due to API error.")
+                    log.warning("Serving stale prices due to batch price API error.")
 
-            # 3. Always return the current cache state
+            else:
+                # --- MARKET IS CLOSED ---
+                log.info("Market is CLOSED. Serving existing prices.")
+
+                # If cache is empty (cold start), we must fetch prices once
+                if is_empty:
+                    log.info(
+                        "Cold start: Fetching initial prices while market is closed.",
+                    )
+                    try:
+                        # --- API Call 2 (Cold Start): Batch Prices (7 credits) ---
+                        price_map = await self.api_client.get_batch_prices(
+                            ALLOWED_STOCKS,
+                        )
+                        update_time = datetime.datetime.now(datetime.UTC)
+                        for ticker, price_float in price_map.items():
+                            if price_float is not None:
+                                self._prices[ticker.upper()] = price_float
+                                self._timestamps[ticker.upper()] = update_time
+                    except Exception:
+                        log.exception(
+                            "Failed to get *initial* prices while market closed.",
+                        )
+                        # Set a short retry and return empty dict
+                        self._next_check_time = now_utc + datetime.timedelta(minutes=1)
+                        return self._prices  # Returns empty {}
+
+                # Now, set the "intelligent TTL"
+                time_to_open_str = self._market_state.get("time_to_open")
+                time_to_open_delta = _parse_api_time(time_to_open_str)
+
+                if time_to_open_delta:
+                    # We have a valid time! Schedule the next check.
+                    # Add a 15-second buffer to ensure market is *really* open.
+                    buffer = datetime.timedelta(seconds=15)
+                    self._next_check_time = now_utc + time_to_open_delta + buffer
+                    log.info(
+                        "Next market check scheduled for %s (in %s)",
+                        self._next_check_time,
+                        time_to_open_delta + buffer,
+                    )
+                else:
+                    # API gave no 'time_to_open' (e.g., "00:00:00" on a weekend)
+                    # Fall back to a long poll (e.g., 1 hour).
+                    log.warning(
+                        "No 'time_to_open' provided. Falling back to 1-hour poll.",
+                    )
+                    self._next_check_time = now_utc + datetime.timedelta(hours=1)
+
+            # 4. Always return the current cache state
             return self._prices
 
-    def get_cached_price(self, ticker: Ticker) -> tuple[Price, datetime.datetime] | tuple[None, None]:
+    def get_cached_price(
+        self,
+        ticker: Ticker,
+    ) -> tuple[float, datetime.datetime] | tuple[None, None]:
         """Get a single price and its timestamp directly from the cache."""
+        # This method is unchanged
         return self._prices.get(ticker), self._timestamps.get(ticker)
 
 
@@ -143,8 +245,6 @@ class TradingLogic:
     respect API rate limits.
     """
 
-    TABLE_NAME: str = "user_holdings"
-
     def __init__(
         self,
         database: Database,
@@ -161,222 +261,319 @@ class TradingLogic:
         """Initialize the database table for portfolios."""
         async with self.database.get_conn() as conn:
             await conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {self.TABLE_NAME} (
-                    user_id     INTEGER CHECK(user_id > 1000000),
-                    guild_id    INTEGER CHECK(guild_id > 1000000),
-                    ticker      TEXT NOT NULL,
-                    quantity    REAL NOT NULL,
-                    avg_cost    REAL NOT NULL,
-                    PRIMARY KEY (user_id, guild_id, ticker),
-                    FOREIGN KEY (user_id, guild_id) REFERENCES users(discord_id, guild_id),
-                    CHECK(quantity > 0)
-                ) STRICT, WITHOUT ROWID;
+                """
+                CREATE TABLE IF NOT EXISTS positions (
+                    position_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id         INTEGER NOT NULL,
+                    guild_id        INTEGER NOT NULL,
+                    ticker          TEXT NOT NULL,
+                    invested_dollars INTEGER NOT NULL, -- User's integer input, e.g., 100 or -100
+                    entry_price     REAL NOT NULL,    -- Price at open
+                    timestamp       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+                    FOREIGN KEY (user_id, guild_id) REFERENCES users(discord_id, guild_id)
+                ) STRICT;
                 """,
             )
             await conn.commit()
-            log.info("Initialized user_holdings database table.")
+            log.info("Initialized positions database table.")
 
-    # --- Database Helpers ---
-    async def fetch_holdings(self, user_id: UserId, guild_id: GuildId) -> list[dict]:
-        """Retrieve all of a user's holdings from the database."""
-        async with self.database.get_cursor() as cursor:
-            await cursor.execute(
-                f"SELECT ticker, quantity, avg_cost FROM {self.TABLE_NAME} WHERE user_id = ? AND guild_id = ?",  # noqa: S608
-                (user_id, guild_id),
-            )
-            rows = await cursor.fetchall()
-
-        return [
-            {
-                "ticker": row[0],
-                "quantity": row[1],
-                "avg_cost": row[2],
-            }
-            for row in rows
-        ]
-
-    # --- Financial Engine / Simulation Logic ---
-    async def _execute_buy_order(
+    async def _update_cash_balance(
         self,
-        conn: Connection,
+        conn: aiosqlite.Connection,  # The transaction connection
         user_id: UserId,
         guild_id: GuildId,
-        ticker: Ticker,
-        amount: PositiveInt,
-        current_price: Price,
-    ) -> None:
-        """Execute the database operations for a buy order. (Must be run inside a transaction)."""
-        cost = amount
-        # Round the new shares to 2 decimal places
-        new_shares = round(cost / current_price, 2)
+        cash_change_int: int,
+    ) -> int:
+        """Atomically update a user's cash balance.
 
-        # 1. Atomically decrement cash and check for sufficient funds
-        cursor = await conn.execute(
-            f"""UPDATE {self.user_db.USERS_TABLE} SET currency = currency - ?
-WHERE discord_id = ? AND guild_id = ? AND currency >= ?""",  # noqa: S608
-            (cost, user_id, guild_id, cost),
-        )
-        if cursor.rowcount == 0:
-            msg = f"Insufficient funds. You need ${cost:.2f} to make this purchase."
-            raise InsufficientFundsError(msg)
-
-        # 2. Fetch existing holding to calculate new average cost in Python
-        cursor = await conn.execute(
-            f"SELECT quantity, avg_cost FROM {self.TABLE_NAME} WHERE user_id = ? AND guild_id = ? AND ticker = ?",  # noqa: S608
-            (user_id, guild_id, ticker),
-        )
-        row = await cursor.fetchone()
-        old_qty, old_avg_cost = (row[0], row[1]) if row else (0.0, 0.0)
-
-        # 3. Calculate new average cost in Python
-        total_cost = (old_avg_cost * old_qty) + (current_price * new_shares)
-        total_shares = old_qty + new_shares
-        # Explicitly round the final total shares
-        total_shares = round(total_shares, 2)
-        new_avg_cost = total_cost / total_shares if total_shares > 0 else 0.0
-
-        # 4. UPSERT the holding with the new calculated values
-        await conn.execute(
-            f"""INSERT INTO {self.TABLE_NAME} (user_id, guild_id, ticker, quantity, avg_cost)
-                           VALUES (?, ?, ?, ?, ?)
-                           ON CONFLICT(user_id, guild_id, ticker) DO UPDATE SET
-                               quantity = ?,
-                               avg_cost = ?
-                        """,  # noqa: S608
-            (
-                user_id,
-                guild_id,
-                ticker,
-                total_shares,
-                new_avg_cost,
-                total_shares,  # For the UPDATE part of the UPSERT
-                new_avg_cost,  # For the UPDATE part of the UPSERT
-            ),
-        )
-
-    async def _execute_sell_order(
-        self,
-        conn: Connection,
-        user_id: UserId,
-        guild_id: GuildId,
-        ticker: Ticker,
-        quantity: Quantity,
-        current_price: Price,
-    ) -> None:
-        """Execute the database operations for a sell order. (Must be run inside a transaction)."""
-        credit = PositiveInt(int(quantity * current_price))
-
-        # 1. Get current holding to validate sale
-        cursor = await conn.execute(
-            f"SELECT quantity FROM {self.TABLE_NAME} WHERE user_id = ? AND guild_id = ? AND ticker = ?",  # noqa: S608
-            (user_id, guild_id, ticker),
-        )
-        row = await cursor.fetchone()
-
-        current_quantity = row[0] if row else 0.0
-        if not row or current_quantity < quantity:
-            msg = f"Cannot sell {quantity} shares of {ticker}. Only owns {current_quantity}."
-            raise ValueError(msg)
-
-        # 2. Update or Delete from 'user_holdings' table
-        new_qty = round(current_quantity - quantity, 2)
-        if new_qty < 0.01:  # Check if quantity is less than one cent's worth of a share
+        Raises InsufficientFundsError if a debit fails.
+        Returns the new cash balance (as a Decimal).
+        """
+        if cash_change_int > 0:
+            # A. Credit Cash (Safe)
             await conn.execute(
-                f"DELETE FROM {self.TABLE_NAME} WHERE user_id = ? AND guild_id = ? AND ticker = ?",  # noqa: S608
-                (user_id, guild_id, ticker),
+                f"""INSERT INTO {self.user_db.USERS_TABLE} (discord_id, guild_id, currency) VALUES (?, ?, ?)
+                     ON CONFLICT(discord_id, guild_id) DO UPDATE SET currency = currency + ?""",  # noqa: S608
+                (user_id, guild_id, cash_change_int, cash_change_int),
             )
-        else:
-            await conn.execute(
-                f"UPDATE {self.TABLE_NAME} SET quantity = ? WHERE user_id = ? AND guild_id = ? AND ticker = ?",  # noqa: S608
-                (new_qty, user_id, guild_id, ticker),
+        elif cash_change_int < 0:
+            # B. Debit Cash (Atomic Check)
+            debit_amount = abs(cash_change_int)
+            cursor = await conn.execute(
+                f"""UPDATE {self.user_db.USERS_TABLE}
+                     SET currency = currency - ?
+                     WHERE discord_id = ? AND guild_id = ? AND currency >= ?""",  # noqa: S608
+                (debit_amount, user_id, guild_id, debit_amount),
             )
-        # 3. Increment cash
-        await conn.execute(
-            f"UPDATE {self.user_db.USERS_TABLE} SET currency = currency + ? WHERE discord_id = ? AND guild_id = ?",  # noqa: S608
-            (credit, user_id, guild_id),
-        )
+            if cursor.rowcount == 0:
+                msg = f"Insufficient funds. You need ${debit_amount} to execute this trade."
+                raise InsufficientFundsError(msg)
 
-    async def execute_trade(
+        # C. Get the new balance *after* the update
+        cursor = await conn.execute(
+            f"SELECT currency FROM {self.user_db.USERS_TABLE} WHERE discord_id = ? AND guild_id = ?",  # noqa: S608
+            (user_id, guild_id),
+        )
+        return (await cursor.fetchone())[0]
+
+    async def open_position(
         self,
         user_id: UserId,
         guild_id: GuildId,
         ticker: Ticker,
-        order_type: str,
-        *,
-        quantity: Quantity | None = None,
-        amount: PositiveInt | None = None,
-    ) -> tuple[Price, Price, datetime.datetime]:
-        """Execute a buy or sell order using cached prices."""
+        trade_type: Literal["BUY", "SHORT"],
+        dollar_amount: int,  # This is now a simple int
+    ) -> tuple[float, int, str, datetime.datetime, bool, int]:
+        """Open a new long or short position (a new 'lot').
+
+        This is a 'lossless' open, where the user's bank is debited
+        by exactly the amount they specified.
+
+        Returns:
+            A tuple of (filled_price, invested_dollars_this_trade, action_string,
+            timestamp, was_stacked, total_invested_in_position).
+
+        """
         ticker = ticker.upper()
 
-        # 1. Get fresh prices from the encapsulated cache
+        # 1. Get Price
         price_map = await self.price_cache.get_fresh_prices()
         current_price, timestamp = (
             price_map.get(ticker),
             self.price_cache.get_cached_price(ticker)[1],
         )
 
-        if current_price is None:
-            # This now means the ticker is invalid, delisted, or the refresh failed.
-            # via /lookup and the subsequent refresh failed to find it.
-            log.warning(
-                "Trade rejected: User %s tried to trade %s, but its price is not in the cache.",
-                user_id,
-                ticker,
-            )
-            msg = f"Trade rejected: {ticker} is not a supported trading symbol."
+        if current_price is None or float(current_price) <= 0:
+            msg = f"Trade rejected: {ticker} is not a supported trading symbol or has no price."
             raise PriceNotAvailableError(msg)
 
-        # Get a single connection for the entire transaction
+        current_price_float = float(current_price)
+
+        # 2. Determine Position Details
+        if trade_type == "BUY":
+            invested_dollars_int = dollar_amount
+            cash_change_int = -dollar_amount  # Debit user
+            action = "BOUGHT"
+        else:  # "SHORT"
+            invested_dollars_int = -dollar_amount
+            cash_change_int = -dollar_amount  # Debit for collateral
+            action = "SHORTED"
+
         async with self.database.get_conn() as conn:
             try:
-                # 2. Dispatch to the correct helper
-                if order_type == "buy":
-                    if amount is None:
-                        msg = "Buy orders must specify an amount."
-                        raise ValueError(msg)
-                    await self._execute_buy_order(conn, user_id, guild_id, ticker, amount, current_price)
-                elif order_type == "sell":
-                    if quantity is None:
-                        msg = "Sell orders must specify a quantity."
-                        raise ValueError(msg)
-                    await self._execute_sell_order(conn, user_id, guild_id, ticker, quantity, current_price)
-                else:
-                    msg = "Invalid order_type specified."
-                    raise ValueError(msg)
-
-                # 3. Commit the single, atomic transaction
-                await conn.commit()
-                log.info(
-                    "Trade committed for user %s: %s %s %s @ $%.2f",
+                # 1. Update Cash (raises InsufficientFundsError)
+                await self._update_cash_balance(
+                    conn,
                     user_id,
-                    order_type.upper(),
-                    quantity if order_type == "sell" else amount,  # Log amount for buy, qty for sell
-                    ticker,
-                    current_price,
+                    guild_id,
+                    cash_change_int,
                 )
 
-                # 4. Get the final cash balance to return it
+                # 2. Check for a stackable position OF THE SAME TYPE
+                # We must only stack longs on longs (invested_dollars > 0)
+                # and shorts on shorts (invested_dollars < 0)
+                stack_direction_check = "invested_dollars > 0" if trade_type == "BUY" else "invested_dollars < 0"
+
                 cursor = await conn.execute(
-                    f"SELECT currency FROM {self.user_db.USERS_TABLE} WHERE discord_id = ? AND guild_id = ?",  # noqa: S608
-                    (user_id, guild_id),
+                    f"""SELECT position_id, invested_dollars FROM positions
+                        WHERE user_id = ? AND guild_id = ? AND ticker = ?
+                        AND entry_price = ? AND {stack_direction_check}""",  # noqa: S608 (f-string is safe)
+                    (user_id, guild_id, ticker, current_price_float),
                 )
-                new_balance_row = await cursor.fetchone()
-                return (
-                    current_price,
-                    new_balance_row[0] if new_balance_row else 0,
-                    timestamp,
+                existing_position = await cursor.fetchone()
+
+                was_stacked = False
+                total_invested_in_position = 0
+
+                if existing_position:
+                    # Stack the position
+                    was_stacked = True
+                    position_id, existing_invested = existing_position
+                    new_invested_dollars = existing_invested + invested_dollars_int
+                    total_invested_in_position = new_invested_dollars
+
+                    await conn.execute(
+                        "UPDATE positions SET invested_dollars = ? WHERE position_id = ?",
+                        (new_invested_dollars, position_id),
+                    )
+                else:
+                    # Create a new position lot
+                    was_stacked = False
+                    total_invested_in_position = invested_dollars_int
+                    await conn.execute(
+                        """
+                        INSERT INTO positions (user_id, guild_id, ticker, invested_dollars, entry_price)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            user_id,
+                            guild_id,
+                            ticker,
+                            invested_dollars_int,
+                            current_price_float,
+                        ),
+                    )
+
+                # 3. Commit
+                await conn.commit()
+
+                log.info(
+                    "Position %s for user %s: %s $%s of %s @ $%s",
+                    "stacked" if was_stacked else "opened",
+                    user_id,
+                    action,
+                    dollar_amount,
+                    ticker,
+                    current_price_float,
                 )
 
             except Exception:
                 await conn.rollback()
-                log.exception("Trade failed and was rolled back for user %s", user_id)
+                log.exception(
+                    "Position open failed and was rolled back for user %s",
+                    user_id,
+                )
                 raise
+            else:
+                return (
+                    current_price_float,
+                    invested_dollars_int,  # The amount for this trade, e.g., 100 or -100
+                    action,
+                    timestamp,
+                    was_stacked,
+                    total_invested_in_position,
+                )
+
+    async def close_position(
+        self,
+        user_id: UserId,
+        guild_id: GuildId,
+        position_id: int,
+        close_amount: int | None = None,
+    ) -> tuple[str, float, float, int, int, bool]:
+        """Close a position ('lot') fully.
+
+        This is a 'lossy' transaction where the slippage fee is realized
+        by flooring the final credit.
+
+        Returns
+        -------
+            A tuple of (ticker, pnl_precise, total_credit_precise, final_credit_int, invested_dollars_closed, is_partial_close)
+
+        """
+        async with self.database.get_conn() as conn:
+            try:
+                # 1. Get the position
+                cursor = await conn.execute(
+                    """
+                    SELECT ticker, invested_dollars, entry_price
+                    FROM positions
+                    WHERE position_id = ? AND user_id = ? AND guild_id = ?
+                    """,
+                    (position_id, user_id, guild_id),
+                )
+                row = await cursor.fetchone()
+
+                if not row:
+                    msg = f"Position ID {position_id} not found or does not belong to you."
+                    raise PortfolioNotFoundError(msg)
+
+                ticker, invested_dollars_total, entry_price = row
+                ticker = str(ticker)
+                invested_dollars_total = int(invested_dollars_total)
+                entry_price = float(entry_price)
+
+                # 2. Determine Amount to Close
+                invested_dollars_to_close = invested_dollars_total
+
+                # A partial close is only possible if a close_amount is specified
+                # and it's less than the total invested amount.
+                is_partial_close = close_amount is not None and close_amount < abs(invested_dollars_total)
+
+                # This explicit check helps the type checker narrow `close_amount` to `int`.
+                # We know this is true because of the `is_partial_close` condition.
+                if is_partial_close and close_amount is not None:
+                    # We've already confirmed close_amount is not None, so this is safe.
+                    # Match the sign of the original investment for the partial amount.
+                    invested_dollars_to_close = close_amount if invested_dollars_total > 0 else -close_amount
+
+                # 2. Get Current Price
+                price_map = await self.price_cache.get_fresh_prices()
+                current_price = price_map.get(ticker)
+                if current_price is None or float(current_price) <= 0:
+                    msg = f"Could not close position: Price for {ticker} is currently unavailable."
+                    raise PriceNotAvailableError(msg)
+
+                current_price_float = float(current_price)
+
+                # 3. Calculate P&L and Credit
+                # This simple math works for both long (invested_dollars > 0)
+                # and short (invested_dollars < 0)
+                price_change_pct = (current_price_float / entry_price) - 1.0
+                pnl_precise = invested_dollars_to_close * price_change_pct
+
+                # The total value to return to the user
+                # For Long: 100 (principal) + 16.66 (pnl) = 116.66
+                # For Short: 100 (abs(principal)) + 16.66 (pnl) = 116.66
+                total_credit_precise = abs(invested_dollars_to_close) + pnl_precise
+
+                # 4. Apply Slippage (The Money Sink)
+                # We floor the credit. e.g., 116.66 -> 116.
+                final_credit_int = math.floor(total_credit_precise)
+
+                # 5. Update Bank Account
+                await self._update_cash_balance(
+                    conn,
+                    user_id,
+                    guild_id,
+                    final_credit_int,  # This is the final credit
+                )
+
+                # 6. Update or Delete the position
+                if is_partial_close:
+                    new_invested_dollars = invested_dollars_total - invested_dollars_to_close
+                    await conn.execute(
+                        "UPDATE positions SET invested_dollars = ? WHERE position_id = ?",
+                        (new_invested_dollars, position_id),
+                    )
+                else:
+                    await conn.execute(
+                        "DELETE FROM positions WHERE position_id = ?",
+                        (position_id,),
+                    )
+
+                # 7. Commit
+                await conn.commit()
+
+                log.info(
+                    "Position %s closed for user %s. P&L: %s",
+                    position_id,
+                    user_id,
+                    pnl_precise,
+                )
+
+            except Exception:
+                await conn.rollback()
+                log.exception(
+                    "Position close failed and was rolled back for user %s",
+                    user_id,
+                )
+                raise
+
+            else:
+                return (
+                    ticker,
+                    pnl_precise,
+                    total_credit_precise,
+                    final_credit_int,
+                    invested_dollars_to_close,
+                    is_partial_close,
+                )
 
     # --- Other Business Logic (e.g., portfolio P&L calculation) ---
     def is_market_open(self) -> bool:
-        """Pass-through check to see if the US market is currently open."""
+        """Pass-through check to see if the US market is currently open based on the last API check."""
+        # This now correctly checks the *cached* API state
         return self.price_cache.is_us_market_open()
 
     async def calculate_portfolio_value(
@@ -385,75 +582,85 @@ WHERE discord_id = ? AND guild_id = ? AND currency >= ?""",  # noqa: S608
         guild_id: GuildId,
     ) -> dict | None:
         """Calculate the current cached market value and P&L of a user's portfolio."""
-        # This ensures the cache is fresh before we read from it.
         await self.price_cache.get_fresh_prices()
 
-        holdings = await self.fetch_holdings(user_id, guild_id)
-
-        # Fetch cash from UserDB, the single source of truth
-        user_cash_balance = await self.user_db.get_stat(
+        # 1. Fetch cash from UserDB
+        user_cash_int = await self.user_db.get_stat(
             user_id,
             guild_id,
             StatName.CURRENCY,
         )
+        user_cash_balance = float(user_cash_int)  # Use float for calculations
 
-        total_market_value = 0.0
-        total_cost_basis = 0.0
-        positions = []
+        # 2. Fetch all position lots
+        async with self.database.get_cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT position_id, ticker, invested_dollars, entry_price, timestamp
+                FROM positions
+                WHERE user_id = ? AND guild_id = ?
+                ORDER BY timestamp ASC
+                """,
+                (user_id, guild_id),
+            )
+            rows = await cursor.fetchall()
 
-        # This loop is now fast and makes NO API calls
-        for holding in holdings:
-            ticker, data = holding["ticker"], holding
-            quantity = data["quantity"]
-            avg_cost = data["avg_cost"]
-            cost_basis = quantity * avg_cost
-            total_cost_basis += cost_basis
+        total_long_value = 0.0
+        total_short_liability = 0.0
+        total_short_collateral = 0.0
+        total_pnl = 0.0
+        positions_list = []
 
-            # Get price from cache
+        for row in rows:
+            pos_id, ticker, invested_dollars, entry_price, timestamp = row
+            invested_dollars = int(invested_dollars)
+            entry_price = float(entry_price)
+
             current_price, _ = self.price_cache.get_cached_price(ticker)
 
+            pos_data = {
+                "id": pos_id,
+                "ticker": ticker,
+                "invested": invested_dollars,  # e.g., 100 or -100
+                "entry": entry_price,
+                "timestamp": timestamp,
+                "current_price": current_price,
+                "current_value": None,
+                "pnl": None,
+            }
+
             if current_price is not None:
-                market_value = quantity * current_price
-                pnl = market_value - cost_basis
-                total_market_value += market_value
+                current_price_float = float(current_price)
+                price_change_pct = (current_price_float / entry_price) - 1.0
+                pnl = invested_dollars * price_change_pct
+                current_value = invested_dollars + pnl  # This is the "market value"
 
-                positions.append(
-                    {
-                        "ticker": ticker,
-                        "quantity": quantity,
-                        "avg_cost": avg_cost,
-                        "current_price": current_price,
-                        "market_value": market_value,
-                        "pnl": pnl,
-                        "cost_basis": cost_basis,
-                    },
-                )
-            else:
-                # Price fetch failed or is pending (e.g., delisted stock)
-                log.warning(
-                    "Could not get cached price for owned ticker %s in user %s portfolio.",
-                    ticker,
-                    user_id,
-                )
-                positions.append(
-                    {
-                        "ticker": ticker,
-                        "quantity": data["quantity"],
-                        "avg_cost": data["avg_cost"],
-                        "current_price": None,  # Indicate price fetch failed
-                        "market_value": None,
-                        "pnl": None,
-                        "cost_basis": cost_basis,  # Cost basis is still known
-                    },
-                )
+                pos_data["current_price"] = current_price_float
+                pos_data["current_value"] = current_value
+                pos_data["pnl"] = pnl
 
-        total_pnl = total_market_value - total_cost_basis
-        total_portfolio_value = user_cash_balance + total_market_value
+                total_pnl += pnl
+                if invested_dollars > 0:
+                    total_long_value += current_value
+                else:
+                    # current_value will be negative, e.g., -80
+                    # This represents a liability of 80
+                    total_short_liability += abs(current_value)
+                    # Add the original investment amount to the collateral tracker
+                    total_short_collateral += abs(invested_dollars)
+
+            positions_list.append(pos_data)
+
+        # Net Equity = Cash + (Value of Longs) - (Liability of Shorts) + (Collateral for Shorts)
+        total_holdings_value = total_long_value - total_short_liability
+        total_portfolio_value = user_cash_balance + total_holdings_value + total_short_collateral
 
         return {
             "cash_balance": user_cash_balance,
-            "holdings_value": total_market_value,
-            "total_value": total_portfolio_value,
+            "holdings_value": total_long_value,  # Value of long positions
+            "short_liability": total_short_liability,  # ABS value of short positions
+            "short_collateral": total_short_collateral,  # Collateral held for shorts
+            "total_value": total_portfolio_value,  # True Net Equity
             "total_pnl": total_pnl,
-            "positions": positions,
+            "positions": positions_list,  # List of dictionaries
         }

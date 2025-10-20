@@ -150,7 +150,7 @@ class AioTwelveDataClient:
                 return data
 
         except aiohttp.ClientResponseError as e:  # Catch errors raised by raise_for_status
-            log.exception("HTTP error during API request: %s %s", e.status, e.message)
+            log.exception("HTTP error during API request")
             msg = f"API request failed: {e.status} {e.message}"
             raise AioTwelveDataRequestError(
                 msg,
@@ -174,6 +174,50 @@ class AioTwelveDataClient:
             raise AioTwelveDataError(
                 msg,
             ) from e
+
+    async def get_market_state(self, exchange: str) -> dict[str, Any] | None:
+        """Fetch the market state for a specific exchange.
+
+        Returns the first matching exchange dictionary or None if not found/error.
+        """
+        log.debug("Fetching market state for: %s", exchange)
+        try:
+            # The API returns a list, even for a single exchange
+            data = await self._request(
+                "GET",
+                "/market_state",
+                params={"exchange": exchange, "source": "aiohttp-cache-check"},
+            )
+
+            # API returns a list, find the first entry matching the name
+            if isinstance(data, list):
+                for entry in data:
+                    if isinstance(entry, dict) and entry.get("name", "").upper() == exchange.upper():
+                        log.debug("Found market state for %s: %s", exchange, entry)
+                        return entry
+                log.warning(
+                    "Market state list received, but no entry matched name: %s",
+                    exchange,
+                )
+                return None  # Found list but not the exchange
+
+            log.error(
+                "Unexpected market state response format. Expected list, got %s",
+                type(data).__name__,
+            )
+
+        except (AioTwelveDataRequestError, AioTwelveDataApiError):
+            # Log and return None, don't raise. Let the caller decide how to handle.
+            log.exception("Failed to fetch market state for (%s)", exchange)
+            return None
+        except Exception:
+            log.exception(
+                "Unexpected error during market state fetch for (%s)",
+                exchange,
+            )
+            return None
+        else:
+            return None
 
     # --- Public API Methods ---
 

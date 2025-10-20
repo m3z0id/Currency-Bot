@@ -1,10 +1,9 @@
-"""Manages user-specific data and preferences in the database.
+"""Manage user-specific data and preferences in the database.
 
-This module handles the `users` table, which is the single source of truth for
-all user-specific data, including stats (currency, bumps, XP), preferences
-(reminders, opt-outs), and state (daily claims, activity). The schema is defined
-with strict constraints and generated columns to enforce business logic and data
-integrity directly at the database level.
+The `users` table is the single source of truth for all user-specific data,
+including stats (currency, bumps, XP), preferences (reminders, opt-outs),
+and state (daily claims, activity). The schema is defined with strict
+constraints and generated columns to enforce data integrity.
 """
 
 from __future__ import annotations
@@ -32,6 +31,7 @@ class UserDB:
     async def post_init(self) -> None:
         """Initialize the database table for users."""
         async with self.database.get_conn() as conn:
+            # CHECK > 1000000 for snowflakes
             await conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {self.USERS_TABLE} (
@@ -56,10 +56,7 @@ class UserDB:
                     has_claimed_daily           INTEGER NOT NULL DEFAULT 0 CHECK(has_claimed_daily IN (0, 1)),
 
                     -- Keys & Constraints
-                    PRIMARY KEY (discord_id, guild_id),
-
-                    -- Invariant: 'ONCE' preference is only for users who haven't claimed.
-                    CHECK(NOT (daily_reminder_preference = 'ONCE' AND has_claimed_daily = 1))
+                    PRIMARY KEY (discord_id, guild_id)
                 ) STRICT;
                 """,
             )

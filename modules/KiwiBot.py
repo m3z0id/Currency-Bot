@@ -128,6 +128,12 @@ class KiwiBot(commands.Bot):
 
         log.info("Setup complete.")
 
+    async def on_ready(self) -> None:
+        if self.guilds:
+            log.info("Bot is in %d guilds.", len(self.guilds))
+        else:
+            log.error("Bot is not in any guilds!")
+
     async def log_admin_warning(
         self,
         guild_id: GuildId,

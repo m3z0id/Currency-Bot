@@ -35,17 +35,28 @@ class BumpHandlerCog(commands.Cog):
         self.reminder_tasks: dict[GuildId, asyncio.Task | None] = {}
         self.disboard_bot_id = disboard_bot_id
 
-    async def cog_load(self) -> None:
-        """On cog load, find the last bump and process it to schedule a reminder."""
-        log.info("BumpHandlerCog loaded. Searching for the last bump...")
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        """Find the last bump and process it to schedule a reminder.
+
+        This method is idempotent and can handle reconnections.
+        """
+        log.info("BumpHandlerCog loaded. Searching for the last bump in %s", self.bot.guilds)
         for guild in self.bot.guilds:
             last_bump_message = await self._find_last_bump_message(guild)
             if last_bump_message:
-                log.info("Found historical bump message %s in guild %s. Processing it.", last_bump_message.id, guild.name)
+                log.info(
+                    "Found historical bump message %s in guild %s. Processing it.",
+                    last_bump_message.id,
+                    guild.name,
+                )
                 # Process the found message, but don't re-reward the user.
                 await self._process_bump(last_bump_message, is_new_bump=False)
             else:
-                log.info("No recent bump message found in guild %s. No reminder scheduled.", guild.name)
+                log.info(
+                    "No recent bump message found in guild %s. No reminder scheduled.",
+                    guild.name,
+                )
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -72,7 +83,10 @@ class BumpHandlerCog(commands.Cog):
         bumper_role_id = config.bumper_role_id
 
         if not bumper_role_id:
-            log.debug("Skipping bump processing for guild %d: Bumper role not configured.", guild_id)
+            log.debug(
+                "Skipping bump processing for guild %d: Bumper role not configured.",
+                guild_id,
+            )
             return
 
         bumper = message.interaction_metadata.user
@@ -131,7 +145,8 @@ class BumpHandlerCog(commands.Cog):
                 await self._send_reminder_message(channel, last_bumper, config.bumper_role_id)
             return
 
-        log.info("Scheduling bump reminder in %.2f seconds.", delay_seconds)
+        delay_seconds = int(delay_seconds)  # floor it (sending a bit early is good)
+        log.info("Scheduling bump reminder in %s seconds.", delay_seconds)
 
         # Calculate the delay for the backup reminder. If the primary reminder is already late,
         # this will be negative, and we'll adjust accordingly.
