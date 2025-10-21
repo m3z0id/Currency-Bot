@@ -7,9 +7,9 @@ from typing import Final
 from discord import Object, app_commands
 from discord.ext import commands
 
+from modules.dtypes import GuildId, PositiveInt, UserId
 from modules.enums import StatName
 from modules.KiwiBot import KiwiBot
-from modules.types import GuildId, PositiveInt, UserId
 
 log = logging.getLogger(__name__)
 
@@ -45,20 +45,6 @@ class Harvest(commands.Cog):
     def __init__(self, bot: KiwiBot) -> None:
         self.bot = bot
 
-    # This check applies to all text-based commands in this cog,
-    # ensuring they only run in the specified guild.
-    async def cog_check(self, ctx: commands.Context) -> bool:
-        """Verify that the command is used in the correct guild.
-
-        Args:
-            ctx: The command context.
-
-        Returns:
-            True if the guild is correct, otherwise False.
-
-        """
-        return ctx.guild is not None and ctx.guild.id == self.bot.config.swl_guild_id
-
     async def _process_sale(
         self,
         ctx: commands.Context,
@@ -75,6 +61,11 @@ class Harvest(commands.Cog):
             action_name: The name of the action being performed.
 
         """
+        # Verify that the command is used in the correct guild.
+        if ctx.guild is None or ctx.guild.id != self.bot.config.swl_guild_id:
+            await ctx.send("Shh don't worry about it.")
+            return
+
         if item is None:
             item = random.choice(item_list)
 

@@ -4,8 +4,8 @@ from typing import TYPE_CHECKING
 from discord import Forbidden, HTTPException
 from discord.ext import commands, tasks
 
+from modules.dtypes import GuildId
 from modules.KiwiBot import KiwiBot
-from modules.types import GuildId
 from modules.UserDB import UserDB
 
 if TYPE_CHECKING:

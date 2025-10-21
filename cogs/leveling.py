@@ -8,11 +8,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from modules.dtypes import GuildId, NonNegativeInt, PositiveInt, UserGuildPair, UserId
 from modules.enums import StatName
 
 # Import the refactored logic and helpers
 from modules.leveling_utils import LevelBotProtocol, get_level, to_next_level
-from modules.types import GuildId, NonNegativeInt, UserId
 
 if TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
@@ -28,65 +28,6 @@ LONG_ABSENCE_BONUS_HOURS: Final[int] = 6
 lowercase_letters = set(string.ascii_lowercase)
 
 
-class LeaderboardView(discord.ui.View):
-    """A view for paginating through the server leaderboard."""
-
-    def __init__(
-        self,
-        bot: "KiwiBot",
-        data: list[tuple[int, UserId, NonNegativeInt]],
-        per_page: int = 10,
-    ) -> None:
-        super().__init__(timeout=180)
-        self.bot = bot
-        self.data = data
-        self.per_page = per_page
-        self.current_page = 0
-        self.max_page = (len(self.data) - 1) // self.per_page
-
-    async def get_page_embed(self) -> discord.Embed:
-        """Generate the embed for the current page."""
-        self.previous_button.disabled = self.current_page == 0
-        self.next_button.disabled = self.current_page >= self.max_page
-
-        start = self.current_page * self.per_page
-        end = start + self.per_page
-        page_data = self.data[start:end]
-
-        embed = discord.Embed(
-            title="🏆 Server Leaderboard",
-            color=discord.Color.gold(),
-        )
-
-        description = []
-        # Unpack the (rank, user_id, xp) tuple directly from the data
-        for rank, user_id, xp in page_data:
-            user = self.bot.get_user(user_id) or f"Unknown User ({user_id})"
-            level = get_level(xp)
-            description.append(f"`{rank}.` **{user}** - Level {level} ({xp:,} XP)")
-
-        if not description:
-            description.append("The leaderboard is empty!")
-
-        embed.description = "\n".join(description)
-        embed.set_footer(text=f"Page {self.current_page + 1} / {self.max_page + 1}")
-        return embed
-
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, emoji="⬅️")
-    async def previous_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        if self.current_page > 0:
-            self.current_page -= 1
-            embed = await self.get_page_embed()
-            await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, emoji="➡️")
-    async def next_button(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        if self.current_page < self.max_page:
-            self.current_page += 1
-            embed = await self.get_page_embed()
-            await interaction.response.edit_message(embed=embed, view=self)
-
-
 class LevelingCog(commands.Cog):
     """Handle the leveling system, including XP gain, ranks, and leaderboards."""
 
@@ -100,7 +41,7 @@ class LevelingCog(commands.Cog):
         privileged_guild_id: GuildId,  # Special case for UDP, keep this global guild ID
     ) -> None:
         self.bot = bot
-        self.last_activity_timestamps: dict[tuple[int, int], float] = {}
+        self.last_activity_timestamps: dict[UserGuildPair, float] = {}
         self.udp_transport: asyncio.DatagramTransport | None = None
         self.udp_port = udp_port
         self.privileged_guild_id = privileged_guild_id  # For UDP special case
@@ -126,7 +67,7 @@ class LevelingCog(commands.Cog):
             self.udp_transport.close()
             log.info("Leveling UDP server stopped.")
 
-    def _get_addable_xp(self, user_id: UserId, guild_id: GuildId) -> int:
+    def _get_addable_xp(self, user_id: UserId, guild_id: GuildId) -> NonNegativeInt:
         """Determine if a user is eligible for XP based on cooldowns."""
         now = time.time()
         user_key = (user_id, guild_id)
@@ -135,10 +76,10 @@ class LevelingCog(commands.Cog):
         if seconds_since_last > COOLDOWN_SECONDS:
             self.last_activity_timestamps[user_key] = now
             # Bonus for being away for more than 6 hours
-            if seconds_since_last > (LONG_ABSENCE_BONUS_HOURS * 3600):
-                return 4  # Bonus for long absence
-            return 1
-        return 0
+            if seconds_since_last > (LONG_ABSENCE_BONUS_HOURS * 3600):  # 6 hours in seconds
+                return NonNegativeInt(4)  # Bonus for long absence
+            return NonNegativeInt(1)
+        return NonNegativeInt(0)
 
     async def _handle_level_up_announcement(
         self,
@@ -194,7 +135,7 @@ class LevelingCog(commands.Cog):
             return False
         return member.get_role(role_id) is not None
 
-    async def _grant_xp(self, user_id: UserId, guild_id: GuildId, source: str, amount: int) -> None:
+    async def _grant_xp(self, user_id: UserId, guild_id: GuildId, source: str, amount: PositiveInt) -> None:
         """Check eligibility and grant XP."""
         guild = self.bot.get_guild(guild_id)
         if not guild:
@@ -233,7 +174,7 @@ class LevelingCog(commands.Cog):
 
         xp_to_add = self._get_addable_xp(UserId(message.author.id), GuildId(message.guild.id))
         if xp_to_add > 0:
-            await self._grant_xp(
+            await self._grant_xp(  # Cast to PositiveInt as _grant_xp expects it
                 UserId(message.author.id),
                 GuildId(message.guild.id),
                 "message",
@@ -377,25 +318,6 @@ class LevelingCog(commands.Cog):
         )
         embed.set_footer(text=f"You need {xp_for_next:,} more XP for the next level.")
         await interaction.response.send_message(embed=embed, ephemeral=ephemeral)
-
-    @level.command(name="leaderboard", description="Shows the XP leaderboard.")
-    async def level_leaderboard(self, interaction: discord.Interaction) -> None:
-        """Show the XP leaderboard.."""
-        await interaction.response.defer()
-
-        data = await self.bot.user_db.get_leaderboard(
-            GuildId(interaction.guild.id),
-            StatName.XP,
-            limit=200,
-        )
-
-        if not data:
-            await interaction.followup.send("The leaderboard is currently empty.")
-            return
-
-        view = LeaderboardView(self.bot, data)
-        embed = await view.get_page_embed()
-        await interaction.followup.send(embed=embed, view=view)
 
     @level.command(name="reset-xp", description="[Admin] Resets a user's XP.")
     @app_commands.checks.has_permissions(manage_guild=True)

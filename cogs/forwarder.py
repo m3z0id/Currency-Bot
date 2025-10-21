@@ -9,7 +9,7 @@ from discord.ext import commands
 if TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
 
-from modules.types import GuildId, is_guild_message
+from modules.dtypes import GuildId, is_guild_message
 
 log = logging.getLogger(__name__)
 

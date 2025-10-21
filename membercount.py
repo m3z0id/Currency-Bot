@@ -44,7 +44,7 @@ def fetch_all_messages(session: requests.Session) -> MessageList:
 
         response = session.get(API_URL, params=params)
 
-        if response.status_code == 429:  # noqa: PLR2004
+        if response.status_code == 429:
             retry_after = response.json().get("retry_after", 1)
             print(f"Rate limited. Retrying in {retry_after}s...")
             time.sleep(retry_after)
@@ -59,7 +59,7 @@ def fetch_all_messages(session: requests.Session) -> MessageList:
         all_messages.extend(batch)
         print(f"Fetched {len(batch)} messages (total: {len(all_messages)})")
 
-        if len(batch) < 100:  # noqa: PLR2004
+        if len(batch) < 100:
             break
 
         before_id = batch[-1]["id"]

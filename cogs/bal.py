@@ -4,9 +4,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from modules.dtypes import GuildId, UserId
 from modules.enums import StatName
 from modules.KiwiBot import KiwiBot
-from modules.types import GuildId, UserId
 
 log = logging.getLogger(__name__)
 

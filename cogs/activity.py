@@ -4,8 +4,8 @@ from typing import override
 import discord
 from discord.ext import commands, tasks
 
+from modules.dtypes import GuildId, UserGuildPair, UserId
 from modules.KiwiBot import KiwiBot
-from modules.types import GuildId, UserGuildPair, UserId
 
 log = logging.getLogger(__name__)
 

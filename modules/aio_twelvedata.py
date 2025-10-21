@@ -1,5 +1,3 @@
-# In modules/aio_twelvedata.py
-# Using Python 3.13+ features
 from __future__ import annotations  # Defer type annotation evaluation
 
 import json
@@ -8,15 +6,15 @@ from typing import TYPE_CHECKING, Any, Self  # Self requires Python 3.11+
 
 import aiohttp  # Ensure aiohttp is installed: pip install aiohttp
 
-if TYPE_CHECKING:
-    import types
-
 # --- Type Hinting Setup ---
 type Ticker = str
 type Price = float
 
 # --- Logging ---
 log = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    import types
 
 
 # --- Custom Exceptions ---

@@ -1,5 +1,6 @@
 import discord
 
+from modules.dtypes import GuildId
 from modules.UserDB import UserDB
 
 
@@ -13,7 +14,7 @@ async def ping_online_role(role: discord.Role, user_db: UserDB) -> str | None:
 
     """
     # Get a set of user IDs that have been active within the last 7 days.
-    active_users_ids = set(await user_db.get_active_users(role.guild.id, 7))
+    active_users_ids = set(await user_db.get_active_users(GuildId(role.guild.id), 7))
 
     # Prioritize online members who are also active.
     online_active_members = [

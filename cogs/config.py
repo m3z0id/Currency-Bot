@@ -5,8 +5,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from modules.dtypes import GuildId, UserId
 from modules.KiwiBot import KiwiBot
-from modules.types import GuildId
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class AutodiscoverView(discord.ui.View):
     def __init__(
         self,
         bot: KiwiBot,
-        author_id: int,
+        author_id: UserId,
         suggestions: dict[str, int],
     ) -> None:
         super().__init__(timeout=180)
@@ -389,7 +389,7 @@ class Config(
         embed = discord.Embed(
             title="🔎 Autodiscovery Results",
             description="\n".join(description_lines),
-            color=discord.Colour.green(),
+            color=discord.Colour.green(),  # Green for success/suggestions
         )
         view = AutodiscoverView(
             self.bot,

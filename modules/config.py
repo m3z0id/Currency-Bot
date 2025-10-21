@@ -1,11 +1,10 @@
-# In modules/config.py
 import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
-from .types import ChannelId, GuildId, UserId
+from .dtypes import ChannelId, GuildId, UserId
 
 log = logging.getLogger(__name__)
 

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cogs.leveling import LevelingCog
-    from modules.types import NonNegativeInt
+    from modules.dtypes import NonNegativeInt
 
 log = logging.getLogger(__name__)
 

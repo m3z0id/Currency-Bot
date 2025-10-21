@@ -10,8 +10,8 @@ from blackjack21 import Card, Dealer, Player, PlayerBase, Table
 from discord import app_commands
 from discord.ext import commands
 
+from modules.dtypes import GuildId, PositiveInt, UserId
 from modules.enums import StatName
-from modules.types import GuildId, PositiveInt, UserId
 
 if TYPE_CHECKING:
     from discord import Interaction

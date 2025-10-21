@@ -1,4 +1,3 @@
-# In cogs/invites.py
 import logging
 from datetime import datetime
 
@@ -6,8 +5,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from modules.dtypes import GuildId, InviterId, UserId
 from modules.KiwiBot import KiwiBot
-from modules.types import GuildId, InviterId, UserId
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +19,7 @@ class InvitesCog(commands.Cog):
 
     def __init__(self, bot: KiwiBot) -> None:  # Removed guild_id, alert_channel_id from init
         self.bot = bot
-        self.invites: dict[int, dict[str, int]] = {}  # Cache still needed for invite diffing
+        self.invites: dict[GuildId, dict[str, int]] = {}  # Cache still needed for invite diffing
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -33,7 +32,7 @@ class InvitesCog(commands.Cog):
         await self.bot.wait_until_ready()
         for guild in self.bot.guilds:
             try:
-                # Store invites with the code as the key and the uses as the value
+                # Store invites with the code as the key and the uses as the value.
                 self.invites[guild.id] = {invite.code: invite.uses for invite in await guild.invites()}
                 log.info(
                     "Successfully cached %s invites for guild %s.",
@@ -76,10 +75,10 @@ class InvitesCog(commands.Cog):
             for invite in current_invites:
                 if invite.uses is not None and (
                     invite.code not in guild_invites or invite.uses > guild_invites.get(invite.code, 0)
-                ):
+                ):  # If invite code is new or uses increased, it's the one.
                     found_invite = invite
                     inviter = invite.inviter
-                    break
+                    break  # Found the invite, stop searching.
 
             # Update the cache with the new uses
             self.invites[member.guild.id] = {invite.code: invite.uses for invite in current_invites if invite.uses is not None}
@@ -158,17 +157,18 @@ class InvitesCog(commands.Cog):
     @commands.Cog.listener()
     async def on_invite_create(self, invite: discord.Invite) -> None:
         """Handle new invite creation to keep the cache updated."""
-        if invite.guild:
-            if invite.guild.id not in self.invites:
-                self.invites[invite.guild.id] = {}
-            self.invites[invite.guild.id][invite.code] = invite.uses
+        if invite.guild and invite.uses is not None:  # Ensure guild exists and uses is not None
+            guild_id = GuildId(invite.guild.id)
+            if guild_id not in self.invites:
+                self.invites[guild_id] = {}
+            self.invites[guild_id][invite.code] = invite.uses
             log.info("Cached new invite '%s' for guild '%s'.", invite.code, invite.guild.name)
 
     @commands.Cog.listener()
     async def on_invite_delete(self, invite: discord.Invite) -> None:
         """Handle invite deletion to keep the cache updated."""
-        if invite.guild and invite.guild.id in self.invites and invite.code in self.invites[invite.guild.id]:
-            del self.invites[invite.guild.id][invite.code]
+        if invite.guild and GuildId(invite.guild.id) in self.invites and invite.code in self.invites[GuildId(invite.guild.id)]:
+            del self.invites[GuildId(invite.guild.id)][invite.code]
             log.info("Removed deleted invite '%s' from cache for guild '%s'.", invite.code, invite.guild.name)
 
     @invites.command(name="top", description="Shows the invite leaderboard.")

@@ -16,8 +16,8 @@ from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands, tasks
 
+from modules.dtypes import GuildId, PositiveInt, ReminderPreference, UserId
 from modules.enums import StatName
-from modules.types import GuildId, ReminderPreference, UserId
 
 if TYPE_CHECKING:
     # This avoids circular imports while providing type hints for the bot class
@@ -257,7 +257,7 @@ class Daily(commands.Cog):
             return
 
         # Simplified reward logic: 1% chance for a jackpot, 99% for a standard reward.
-        daily_mon = random.randint(101, 2000) if random.random() < 0.01 else random.randint(50, 100)
+        daily_mon = PositiveInt(random.randint(101, 2000) if random.random() < 0.01 else random.randint(50, 100))
 
         new_balance = await self.bot.user_db.increment_stat(
             UserId(ctx.author.id),

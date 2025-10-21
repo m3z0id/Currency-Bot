@@ -1,4 +1,3 @@
-# In cogs/paper_trading.py
 from __future__ import annotations  # Defer type annotation evaluation
 
 import logging
@@ -20,8 +19,8 @@ from modules.trading_logic import (
 )
 
 if TYPE_CHECKING:
+    from modules.dtypes import GuildId
     from modules.KiwiBot import KiwiBot
-    from modules.types import GuildId
 
 
 # --- Type Hinting ---

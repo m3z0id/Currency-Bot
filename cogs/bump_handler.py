@@ -8,8 +8,9 @@ import discord
 from discord.ext import commands
 
 from modules.discord_utils import ping_online_role
+from modules.dtypes import GuildId, PositiveInt, RoleId, UserId
 from modules.enums import StatName
-from modules.types import GuildId, RoleId, UserId
+from modules.utils import format_ordinal
 
 if TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
@@ -94,17 +95,17 @@ class BumpHandlerCog(commands.Cog):
 
         try:
             if is_new_bump:
-                reward = random.randint(50, 80)
+                reward = PositiveInt(random.randint(50, 80))
                 user_id = UserId(bumper.id)
                 # Reward Currency
                 await self.bot.user_db.increment_stat(user_id, guild_id, StatName.CURRENCY, reward)
-                new_bump_count = await self.bot.user_db.increment_stat(user_id, guild_id, StatName.BUMPS, 1)
+                new_bump_count = await self.bot.user_db.increment_stat(user_id, guild_id, StatName.BUMPS, PositiveInt(1))
                 log.info("Rewarded %s with $%d for bumping.", bumper.display_name, reward)
                 # Ensure the channel is a TextChannel before sending
                 if not isinstance(channel, discord.TextChannel):
                     return
                 await channel.send(
-                    f"🎉 Thanks for your **{new_bump_count:,}th** bump, {bumper.mention}! You've received **${reward}**.",
+                    f"🎉 Thanks for your {format_ordinal(new_bump_count)} bump, {bumper.mention}! You've received **${reward}**.",
                 )
 
             # --- Unified Reminder Scheduling ---

@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 if TYPE_CHECKING:
     import aiosqlite
 
-    from modules.Database import Database
-    from modules.types import GuildId, UserId
+    from modules.Database import Database  # For type hinting
+    from modules.dtypes import GuildId, PositiveInt, UserId  # Import PositiveInt
     from modules.UserDB import UserDB
 
 # Import new exceptions
@@ -321,8 +321,8 @@ class TradingLogic:
         user_id: UserId,
         guild_id: GuildId,
         ticker: Ticker,
-        trade_type: Literal["BUY", "SHORT"],
-        dollar_amount: int,  # This is now a simple int
+        trade_type: Literal["BUY", "SHORT"],  # Literal for specific string values
+        dollar_amount: PositiveInt,  # This is now a PositiveInt
     ) -> tuple[float, int, str, datetime.datetime, bool, int]:
         """Open a new long or short position (a new 'lot').
 
@@ -449,7 +449,7 @@ class TradingLogic:
         user_id: UserId,
         guild_id: GuildId,
         position_id: int,
-        close_amount: int | None = None,
+        close_amount: PositiveInt | None = None,
     ) -> tuple[str, float, float, int, int, bool]:
         """Close a position ('lot') fully.
 

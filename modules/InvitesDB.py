@@ -12,8 +12,8 @@ from typing import Any
 
 import aiohttp
 
-from modules.Database import Database
-from modules.types import GuildId, InviterId, UserId
+from modules.Database import Database  # For type hinting
+from modules.dtypes import GuildId, InviterId, UserId
 
 log = logging.getLogger(__name__)
 
@@ -137,7 +137,7 @@ class InvitesDB:
 
     # --- Discord Raw API Operations ---
 
-    async def get_member_details_api(self, username: str, guild_id: int) -> dict[str, Any] | None:
+    async def get_member_details_api(self, username: str, guild_id: GuildId) -> dict[str, Any] | None:
         """Find a specific member by username and returns the one that joined most recently."""
         api_url = f"https://discord.com/api/v10/guilds/{guild_id}/members-search"
         payload = {"query": username, "limit": 5}
@@ -157,7 +157,7 @@ class InvitesDB:
             log.exception("API request failed for user %s", username)
             return None
 
-    async def get_all_guild_members_api(self, guild_id: int) -> list[dict[str, Any]]:
+    async def get_all_guild_members_api(self, guild_id: GuildId) -> list[dict[str, Any]]:
         """Fetch all members from a guild using the members-search endpoint."""
         api_url = f"https://discord.com/api/v10/guilds/{guild_id}/members-search"
         # This endpoint uses POST with an empty query to return all members.

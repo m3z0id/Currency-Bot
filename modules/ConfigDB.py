@@ -15,10 +15,12 @@ import logging
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, ClassVar, Self
 
-if TYPE_CHECKING:
+from .dtypes import RoleId
+
+if TYPE_CHECKING:  # For type hinting only, avoids circular imports
     from modules.Database import Database
 
-    from .types import ChannelId, GuildId, RoleId, RoleIdList, UserId
+    from .dtypes import ChannelId, GuildId, RoleIdList, UserId
 
 log = logging.getLogger(__name__)
 
@@ -61,9 +63,9 @@ class GuildConfig:
         try:
             # Find the index for roles_to_prune and convert it
             prune_roles_index = field_names.index("roles_to_prune")
-            prune_roles_str = field_values[prune_roles_index]
+            prune_roles_str: str | None = field_values[prune_roles_index]
             if prune_roles_str:
-                field_values[prune_roles_index] = [int(r_id) for r_id in prune_roles_str.split(",") if r_id.isdigit()]
+                field_values[prune_roles_index] = [RoleId(int(r_id)) for r_id in prune_roles_str.split(",") if r_id.isdigit()]
             else:
                 field_values[prune_roles_index] = None
         except (ValueError, IndexError):
@@ -152,12 +154,12 @@ class ConfigDB:
         self._cache[guild_id] = config
         return config
 
-    async def set_setting(self, guild_id: GuildId, setting: str, value: int | str | list[int] | None) -> None:
+    async def set_setting(self, guild_id: GuildId, setting: str, value: int | str | RoleIdList | None) -> None:
         """Update a single configuration value for a guild."""
         # Validate that the setting is a valid field in the dataclass
         if setting not in {f.name for f in fields(GuildConfig)}:
             msg = f"'{setting}' is not a valid configuration setting."
-            raise ValueError(msg)
+            raise ValueError(msg)  # Raise an error for invalid setting names
 
         # Special handling for list of roles
         if setting == "roles_to_prune" and isinstance(value, list):

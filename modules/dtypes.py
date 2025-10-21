@@ -1,5 +1,4 @@
-# In modules/types.py
-from typing import TYPE_CHECKING, Literal, NewType, TypeGuard, cast
+from typing import TYPE_CHECKING, Literal, NewType, TypeIs, cast
 
 import discord
 
@@ -11,7 +10,7 @@ GuildId = NewType("GuildId", int)
 ChannelId = NewType("ChannelId", int)
 RoleId = NewType("RoleId", int)
 MessageId = NewType("MessageId", int)
-type RoleIdList = list[int]
+type RoleIdList = list[RoleId]
 
 # --- Semantic Type Aliases ---
 # For complex types that appear in multiple places.
@@ -31,12 +30,12 @@ PositiveInt = NewType("PositiveInt", int)
 NonNegativeInt = NewType("NonNegativeInt", int)
 
 
-def is_positive(num: int) -> TypeGuard[PositiveInt]:
+def is_positive(num: int) -> TypeIs[PositiveInt]:
     """Safely cast an int to a PositiveInt."""
     return num > 0
 
 
-def is_non_negative(num: int) -> TypeGuard[NonNegativeInt]:
+def is_non_negative(num: int) -> TypeIs[NonNegativeInt]:
     """Check if a number is a non-negative integer (>= 0)."""
     return num >= 0
 
@@ -49,6 +48,6 @@ if TYPE_CHECKING:
         guild: discord.Guild = cast("discord.Guild", None)
 
 
-def is_guild_message(message: discord.Message) -> "TypeGuard[GuildMessage]":
+def is_guild_message(message: discord.Message) -> "TypeIs[GuildMessage]":
     """Check if a message is from a guild context."""
     return message.guild is not None and isinstance(message.author, discord.Member)

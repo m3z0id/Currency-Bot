@@ -7,17 +7,22 @@ import discord
 from discord import Forbidden, HTTPException, MissingApplicationID
 from discord.app_commands import CommandSyncFailure, TranslationError
 from discord.ext import commands
-from discord.ext.commands import ExtensionAlreadyLoaded, ExtensionFailed, ExtensionNotFound, NoEntryPointError
+from discord.ext.commands import (
+    ExtensionAlreadyLoaded,
+    ExtensionFailed,
+    ExtensionNotFound,
+    NoEntryPointError,
+)
 
 from modules.config import BotConfig
 from modules.ConfigDB import ConfigDB
 from modules.Database import Database
+from modules.dtypes import GuildId
 from modules.InvitesDB import InvitesDB
 from modules.server_admin import ServerManager
 from modules.TaskDB import TaskDB
 from modules.trading_logic import TradingLogic
 from modules.TransactionsDB import TransactionsDB
-from modules.types import GuildId
 from modules.UserDB import UserDB
 
 log = logging.getLogger(__name__)
@@ -87,6 +92,7 @@ class KiwiBot(commands.Bot):
             self.server_manager = ServerManager(servers_path=self.config.servers_path)
             await self.server_manager.__aenter__()  # Start its background tasks
 
+        log.info("Loading extensions...")
         # Now it's safe to load cogs
         try:
             # Add 'cogs.' prefix to the path for loading
@@ -94,36 +100,49 @@ class KiwiBot(commands.Bot):
                 if file.is_file():
                     # Skip loading paper_trading if logic isn't available
                     if file.stem == "paper_trading" and not self.trading_logic:
-                        log.warning(
-                            "Skipping load of cogs.paper_trading: API key not configured.",
-                        )
+                        log.warning("Skipping load of cogs.paper_trading: API key not configured.")
                         continue
-                    await self.load_extension(f"cogs.{file.stem}")
-                    log.info("Loaded %s", file.stem)
-            synced = await self.tree.sync()  # Sync slash commands with Discord
-            log.info("Synced %d command(s) %s", len(synced), [i.name for i in synced])
+
+                    # Try to load each extension individually
+                    try:
+                        await self.load_extension(f"cogs.{file.stem}")
+                        log.info("Loaded %s", file.stem)
+                    except (
+                        ExtensionNotFound,
+                        ExtensionAlreadyLoaded,
+                        NoEntryPointError,
+                        ExtensionFailed,
+                    ):
+                        # Log the specific extension that failed and continue
+                        log.exception("Failed to load extension 'cogs.%s'.", file.stem)
+
+            # Sync commands AFTER attempting to load all cogs
+            synced = await self.tree.sync()  # Sync global slash commands with Discord
+            log.info("Synced %d global command(s) %s", len(synced), [i.name for i in synced])
         except (
             HTTPException,
             CommandSyncFailure,
             Forbidden,
             MissingApplicationID,
             TranslationError,
-            ExtensionNotFound,
-            ExtensionAlreadyLoaded,
-            NoEntryPointError,
-            ExtensionFailed,
         ):
-            log.exception("Error syncing commands")
+            log.exception("Error syncing global commands")
 
         if self.config.swl_guild_id:
             SWL_GUILD: Final[discord.Object] = discord.Object(self.config.swl_guild_id)
-            synced_guild = await self.tree.sync(guild=SWL_GUILD)
-            if synced_guild:
-                log.info(
-                    "Synced %d command(s) for guild %d: %s",
-                    len(synced_guild),
+            try:
+                synced_guild = await self.tree.sync(guild=SWL_GUILD)
+                if synced_guild:
+                    log.info(
+                        "Synced %d command(s) for guild %d: %s",
+                        len(synced_guild),
+                        self.config.swl_guild_id,
+                        [i.name for i in synced_guild],
+                    )
+            except (HTTPException, CommandSyncFailure, Forbidden):
+                log.exception(
+                    "Error syncing guild commands for guild %d",
                     self.config.swl_guild_id,
-                    [i.name for i in synced_guild],
                 )
 
         log.info("Setup complete.")

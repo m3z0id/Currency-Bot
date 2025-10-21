@@ -11,8 +11,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar, override
 
+from modules.dtypes import GuildId, NonNegativeInt, PositiveInt, ReminderPreference, UserGuildPair, UserId
 from modules.enums import StatName
-from modules.types import GuildId, NonNegativeInt, PositiveInt, ReminderPreference, UserGuildPair, UserId
 
 if TYPE_CHECKING:
     from modules.Database import Database
@@ -419,7 +419,7 @@ class UserDB:
         limit: int = 10,
     ) -> list[tuple[int, UserId, int]]:
         """Retrieve the top users by a stat."""
-        query_stat = "xp" if stat == StatName.XP else stat.value
+        query_stat = stat.value
 
         async with self.database.get_cursor() as cursor:
             await cursor.execute(

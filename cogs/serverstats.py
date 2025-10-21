@@ -3,8 +3,8 @@ import logging
 import discord
 from discord.ext import commands, tasks
 
+from modules.dtypes import GuildId
 from modules.KiwiBot import KiwiBot
-from modules.types import GuildId
 
 # Set up basic logging
 log = logging.getLogger(__name__)

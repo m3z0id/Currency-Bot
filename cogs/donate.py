@@ -4,9 +4,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from modules.dtypes import GuildId, UserId, is_positive
 from modules.enums import StatName
 from modules.KiwiBot import KiwiBot
-from modules.types import GuildId, UserId, is_positive
 
 log = logging.getLogger(__name__)
 
@@ -41,8 +41,6 @@ class Donate(commands.Cog):
             await ctx.send(f"Insufficient funds! You have ${balance}")
             return
 
-        # The command framework already ensures amount > 0.
-        # We now use our TypeGuard to inform MyPy of this fact.
         if not is_positive(amount):
             # This branch is logically unreachable due to commands.Range,
             # but it satisfies the type checker.

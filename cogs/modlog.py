@@ -6,7 +6,7 @@ import typing
 import discord
 from discord.ext import commands
 
-from modules.types import GuildId
+from modules.dtypes import GuildId
 
 if typing.TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot

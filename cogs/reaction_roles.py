@@ -9,8 +9,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from modules.dtypes import AnalysisStatus, GuildId, MessageId, is_guild_message
 from modules.KiwiBot import KiwiBot
-from modules.types import AnalysisStatus, GuildId, MessageId, is_guild_message
 
 # A structured dictionary for analysis results, improving code clarity.
 

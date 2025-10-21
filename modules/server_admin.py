@@ -1,7 +1,7 @@
 # server_admin.py
 # A modern, asyncio-based library for administering game servers.
 #
-# To install the required RCON dependency:
+# To enable RCON functionality, install the optional dependency:
 # pip install aiomcrcon
 
 from __future__ import annotations
@@ -16,7 +16,15 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Final, Self
 
-import aiomcrcon
+# Conditional import for aiomcrcon
+AIOMCRCON_AVAILABLE: Final[bool]
+try:
+    import aiomcrcon
+
+    AIOMCRCON_AVAILABLE = True
+except ImportError:
+    aiomcrcon = None  # type: ignore[assignment]
+    AIOMCRCON_AVAILABLE = False
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -199,7 +207,16 @@ class ServerManager:
             self._schedule_refresh(delay=self._POST_ACTION_REFRESH_DELAY)
 
     async def run_rcon(self, server_name: str, command: str) -> str:
-        """Run an RCON command on a server."""
+        """Run an RCON command on a server.
+
+        Requires the 'aiomcrcon' library to be installed.
+        """
+        if not AIOMCRCON_AVAILABLE:
+            msg = (
+                "The 'aiomcrcon' library is not installed, which is required for RCON "
+                "functionality. Please install it with 'pip install aiomcrcon'."
+            )
+            raise ServerAdminError(msg)
         log.info("Executing RCON command on '%s': %s", server_name, command)
         async with self._lock:
             server = self._servers.get(server_name)
@@ -222,15 +239,15 @@ class ServerManager:
                 msg = f"RCON password not found for '{server_name}'."
                 raise PropertiesError(msg)
 
-        try:
-            async with aiomcrcon.Client(
+        try:  # aiomcrcon is guaranteed to be imported here due to the guard above
+            async with aiomcrcon.Client(  # ty: ignore [possibly-missing-attribute]
                 server.ip,
                 server.rcon_port,
                 password,
             ) as client:
                 response, _ = await client.send_cmd(command)
                 return response
-        except aiomcrcon.errors.RCONConnectionError as e:
+        except aiomcrcon.errors.RCONConnectionError as e:  # ty: ignore [possibly-missing-attribute]
             msg = f"Failed to connect to RCON on '{server_name}'."
             raise RCONConnectionError(
                 msg,
