@@ -10,6 +10,7 @@ from discord.ext import commands
 from discord.utils import format_dt  # For formatting timestamps
 
 # --- Local Imports ---
+from modules.dtypes import UserId
 from modules.trading_logic import (
     ALLOWED_STOCKS,
     InsufficientFundsError,
@@ -323,15 +324,18 @@ class PaperTradingCog(commands.Cog):
         name="portfolio",
         description="View your paper trading portfolio.",
     )
-    async def portfolio(self, ctx: commands.Context) -> None:
+    @app_commands.describe(member="User whose portfolio to show")
+    async def portfolio(self, ctx: commands.Context, member: discord.Member | None = None) -> None:
         """Display the user's current portfolio value and holdings."""
         guild_id = await self._ensure_guild_context(ctx)
         if not guild_id:
             return
 
+        target_member = member or ctx.author
+
         try:
             portfolio_data = await self.trading_logic.calculate_portfolio_value(
-                ctx.author.id,
+                UserId(target_member.id),
                 guild_id,
             )
 
@@ -340,7 +344,7 @@ class PaperTradingCog(commands.Cog):
                 return
 
             embed = discord.Embed(
-                title=f"{ctx.author.display_name}'s Portfolio",
+                title=f"{target_member.display_name}'s Portfolio",
                 color=discord.Colour.blue(),
             )
             embed.add_field(

@@ -65,6 +65,8 @@ class JoinLeaveLogCog(commands.Cog):
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:  # noqa: PLR0912
         """Handle logging when a new member joins or rejoins the server."""
+        config = await self.bot.config_db.get_guild_config(GuildId(member.guild.id))
+
         if not member.bot:
             # Log properties that indicate a real, established user account
             # This helps identify potential self-bots (which would have none of these)
@@ -98,7 +100,9 @@ class JoinLeaveLogCog(commands.Cog):
                 "; ".join(user_indicators) if user_indicators else "None",
             )
 
-        config = await self.bot.config_db.get_guild_config(GuildId(member.guild.id))
+            if user_indicators and config.verified_role_id:
+                await member.add_roles(config.verified_role_id, reason="Auto verified")
+
         if not config.join_leave_log_channel_id:
             return  # This guild hasn't configured this feature, so we do nothing.
 
