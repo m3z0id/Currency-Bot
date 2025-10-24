@@ -11,12 +11,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar, override
 
+from modules.CurrencyLedgerDB import SYSTEM_USER_ID
 from modules.dtypes import GuildId, NonNegativeInt, PositiveInt, ReminderPreference, UserGuildPair, UserId
 from modules.enums import StatName
 
 if TYPE_CHECKING:
+    from modules.CurrencyLedgerDB import CurrencyLedgerDB, EventReason
     from modules.Database import Database
-    from modules.TransactionsDB import TransactionsDB
 
 
 # False S608: CURRENCY_TABLE is a constant, not user input. And stat.value is enum.
@@ -64,6 +65,14 @@ class UserDB:
             await conn.execute(
                 f"""
                 CREATE INDEX IF NOT EXISTS idx_users_activity ON {self.USERS_TABLE}(guild_id, last_active_timestamp);
+                """,
+            )
+            # Create a partial index to optimize fetching users who need a daily reminder.
+            await conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_users_pending_reminders
+                ON users(guild_id)
+                WHERE daily_reminder_preference IN ('ALWAYS', 'ONCE');
                 """,
             )
             # Invariant: Bumps are append-only.
@@ -234,14 +243,6 @@ class UserDB:
                 """,  # noqa: S608
                 (guild_id,),
             )
-            # Create a partial index to optimize fetching users who need a daily reminder.
-            await conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_users_pending_reminders
-                ON users(guild_id)
-                WHERE daily_reminder_preference IN ('ALWAYS', 'ONCE');
-                """,
-            )
             await conn.commit()
             return user_ids_to_remind
 
@@ -281,7 +282,166 @@ class UserDB:
             await conn.commit()
             return user_ids_to_remind
 
-    # --- Stat Methods (Migrated from StatsDB) ---
+    async def mint_currency(
+        self,
+        user_id: UserId,
+        guild_id: GuildId,
+        amount: PositiveInt,
+        event_reason: EventReason,
+        ledger_db: CurrencyLedgerDB,
+        initiator_id: UserId | None = None,
+    ) -> NonNegativeInt:
+        """Atomically increment a user's currency and logs it as a MINT event."""
+        sql = f"""
+            INSERT INTO {self.USERS_TABLE} (discord_id, guild_id, currency)
+            VALUES (?, ?, ?)
+            ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                currency = currency + excluded.currency
+            RETURNING currency
+        """  # noqa: S608
+        async with self.database.get_conn() as conn:
+            try:
+                cursor = await conn.execute(sql, (user_id, guild_id, amount))
+                new_value_row = await cursor.fetchone()
+                await ledger_db.log_event(
+                    conn=conn,
+                    guild_id=guild_id,
+                    event_type="MINT",
+                    event_reason=event_reason,
+                    sender_id=SYSTEM_USER_ID,
+                    receiver_id=user_id,
+                    amount=amount,
+                    initiator_id=initiator_id if initiator_id else user_id,
+                )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                self.log.exception(
+                    "Currency minting failed and was rolled back for user %s",
+                    user_id,
+                )
+                # Re-raise or return a failure indicator
+                raise
+            return NonNegativeInt(int(new_value_row[0]) if new_value_row else 0)
+
+    async def burn_currency(
+        self,
+        user_id: UserId,
+        guild_id: GuildId,
+        amount: PositiveInt,
+        event_reason: EventReason,
+        ledger_db: CurrencyLedgerDB,
+        initiator_id: UserId,
+    ) -> int | None:
+        """Atomically decrement a user's currency if they have sufficient funds.
+
+        Logs it as a BURN event. Returns the new balance or None on failure.
+        """
+        sql = f"""
+            UPDATE {self.USERS_TABLE}
+            SET currency = currency - ?
+            WHERE discord_id = ? AND guild_id = ? AND currency >= ?
+            RETURNING currency
+        """  # noqa: S608
+        async with self.database.get_conn() as conn:
+            try:
+                cursor = await conn.execute(sql, (amount, user_id, guild_id, amount))
+                new_value_row = await cursor.fetchone()
+
+                if new_value_row is None:
+                    # Insufficient funds, or user not found. Rollback.
+                    await conn.rollback()
+                    return None
+
+                await ledger_db.log_event(
+                    conn=conn,
+                    guild_id=guild_id,
+                    event_type="BURN",
+                    event_reason=event_reason,
+                    sender_id=user_id,
+                    receiver_id=SYSTEM_USER_ID,  # Money goes to the void
+                    amount=amount,
+                    initiator_id=initiator_id,
+                )
+
+                await conn.commit()
+                return int(new_value_row[0])
+
+            except Exception:
+                await conn.rollback()
+                self.log.exception(
+                    "Currency burning failed and was rolled back for user %s",
+                    user_id,
+                )
+                raise
+
+    async def set_currency_balance_and_log(
+        self,
+        user_id: UserId,
+        guild_id: GuildId,
+        new_balance: NonNegativeInt,
+        event_reason: EventReason,  # e.g., "ADMIN_SET"
+        ledger_db: CurrencyLedgerDB,
+        initiator_id: UserId,
+    ) -> None:
+        """Atomically set a user's balance and logs the *delta* to the currency ledger as a MINT or BURN."""
+        async with self.database.get_conn() as conn:
+            try:
+                # 1. Get current balance (or 0) inside the transaction
+                cursor = await conn.execute(
+                    f"SELECT currency FROM {self.USERS_TABLE} WHERE discord_id = ? AND guild_id = ?",  # noqa: S608
+                    (user_id, guild_id),
+                )
+                row = await cursor.fetchone()
+                current_balance = int(row[0]) if row else 0
+
+                delta = new_balance - current_balance
+
+                # 2. Update the user's balance in the cache
+                await conn.execute(
+                    f"""
+                    INSERT INTO {self.USERS_TABLE} (discord_id, guild_id, currency) VALUES (?, ?, ?)
+                    ON CONFLICT(discord_id, guild_id) DO UPDATE SET currency = excluded.currency
+                    """,  # noqa: S608
+                    (user_id, guild_id, new_balance),
+                )
+
+                # 3. Log the delta to the ledger
+                if delta > 0:
+                    # This was a MINT
+                    await ledger_db.log_event(
+                        conn=conn,
+                        guild_id=guild_id,
+                        event_type="MINT",
+                        event_reason=event_reason,
+                        sender_id=SYSTEM_USER_ID,
+                        receiver_id=user_id,
+                        amount=delta,
+                        initiator_id=initiator_id,
+                    )
+                elif delta < 0:
+                    # This was a BURN
+                    await ledger_db.log_event(
+                        conn=conn,
+                        guild_id=guild_id,
+                        event_type="BURN",
+                        event_reason=event_reason,
+                        sender_id=user_id,
+                        receiver_id=SYSTEM_USER_ID,
+                        amount=abs(delta),
+                        initiator_id=initiator_id,
+                    )
+                # if delta == 0, no change, nothing to log.
+
+                await conn.commit()
+
+            except Exception:
+                await conn.rollback()
+                self.log.exception(
+                    "Setting currency balance failed and was rolled back for user %s",
+                    user_id,
+                )
+                raise
 
     async def get_stat(
         self,
@@ -307,6 +467,11 @@ class UserDB:
         amount: PositiveInt,
     ) -> NonNegativeInt:
         """Atomically increments a user's stat and returns the new value."""
+        # --- ADD THIS GUARD CLAUSE ---
+        if stat is StatName.CURRENCY:
+            msg = "Cannot use increment_stat for currency. Use mint_currency instead."
+            raise PermissionError(msg)
+        # --- END OF GUARD CLAUSE ---
         # stat.value is 'currency', 'bumps', or 'xp' which we safely use to build the query
         sql = f"""
             INSERT INTO {self.USERS_TABLE} (discord_id, guild_id, {stat.value})
@@ -331,6 +496,11 @@ class UserDB:
         amount: PositiveInt,
     ) -> int | None:
         """Atomically decrements a user's stat if they have sufficient value."""
+        # --- ADD THIS GUARD CLAUSE ---
+        if stat is StatName.CURRENCY:
+            msg = "Cannot use decrement_stat for currency. Use burn_currency instead."
+            raise PermissionError(msg)
+        # --- END OF GUARD CLAUSE ---
         sql = f"""
             UPDATE {self.USERS_TABLE}
             SET {stat.value} = {stat.value} - ?
@@ -353,6 +523,11 @@ class UserDB:
         value: int,
     ) -> None:
         """Atomically sets a user's stat to a specific value."""
+        # --- ADD THIS GUARD CLAUSE ---
+        if stat is StatName.CURRENCY:
+            msg = "Cannot use set_stat for currency. Use set_currency_balance_and_log instead."
+            raise PermissionError(msg)
+        # --- END OF GUARD CLAUSE ---
         sql = f"""
             INSERT INTO {self.USERS_TABLE} (discord_id, guild_id, {stat.value})
             VALUES (?, ?, ?)
@@ -369,7 +544,7 @@ class UserDB:
         receiver_id: UserId,
         guild_id: GuildId,
         amount: PositiveInt,
-        transactions_db: TransactionsDB,
+        ledger_db: CurrencyLedgerDB,
     ) -> bool:
         """Atomically transfers currency and logs the transaction."""
         async with self.database.get_conn() as conn:
@@ -392,11 +567,16 @@ class UserDB:
                     (receiver_id, guild_id, amount),
                 )
 
-                # 3. Log the transaction to the new table
-                await conn.execute(
-                    f"""INSERT INTO {transactions_db.TRANSACTIONS_TABLE} (sender_id, receiver_id, guild_id, stat_name, amount)
-                    VALUES (?, ?, ?, ?, ?)""",  # noqa: S608
-                    (sender_id, receiver_id, guild_id, StatName.CURRENCY.value, amount),
+                # 3. Log the transaction to the new ledger
+                await ledger_db.log_event(
+                    conn=conn,
+                    guild_id=guild_id,
+                    event_type="TRANSFER",
+                    event_reason="P2P_TRANSFER",
+                    sender_id=sender_id,
+                    receiver_id=receiver_id,
+                    amount=amount,
+                    initiator_id=sender_id,
                 )
 
                 await conn.commit()

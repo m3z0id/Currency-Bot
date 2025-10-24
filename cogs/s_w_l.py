@@ -8,7 +8,6 @@ from discord import Object, app_commands
 from discord.ext import commands
 
 from modules.dtypes import GuildId, PositiveInt, UserId
-from modules.enums import StatName
 from modules.KiwiBot import KiwiBot
 
 log = logging.getLogger(__name__)
@@ -82,11 +81,13 @@ class Harvest(commands.Cog):
         random_num = PositiveInt(random.randint(1, 20))
         guild_id = GuildId(ctx.guild.id)
         user_id = UserId(ctx.author.id)
-        await self.bot.user_db.increment_stat(
-            user_id,
-            guild_id,
-            StatName.CURRENCY,
-            random_num,
+        await self.bot.user_db.mint_currency(
+            user_id=user_id,
+            guild_id=guild_id,
+            amount=random_num,
+            event_reason="HARVEST_SALE",
+            ledger_db=self.bot.ledger_db,
+            initiator_id=user_id,
         )
 
         log.info(
@@ -131,4 +132,9 @@ class Harvest(commands.Cog):
 
 async def setup(bot: KiwiBot) -> None:
     """Set up the cog."""
+    if not bot.config.swl_guild_id:
+        log.error(
+            "Harvest cog not loaded. Missing 'SWL_GUILD_ID'.",
+        )
+        return
     await bot.add_cog(Harvest(bot))

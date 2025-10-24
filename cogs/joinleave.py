@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 
 from modules.dtypes import GuildId
+from modules.security_utils import is_bot_hierarchy_sufficient, is_role_safe
 from modules.utils import format_ordinal
 
 if TYPE_CHECKING:
@@ -101,7 +102,35 @@ class JoinLeaveLogCog(commands.Cog):
             )
 
             if user_indicators and config.verified_role_id:
-                await member.add_roles(config.verified_role_id, reason="Auto verified")
+                role = member.guild.get_role(config.verified_role_id)
+                if role:
+                    # Allow view message send message and other safe permissions
+                    is_safe, safe_err = is_role_safe(role, require_no_permissions=False)
+                    is_high_enough, hier_err = is_bot_hierarchy_sufficient(member.guild, role)
+
+                    if not is_safe:
+                        await self.bot.log_admin_warning(
+                            guild_id=GuildId(member.guild.id),
+                            warning_type="dangerous_role_assignment",
+                            description=(
+                                f"**Blocked** auto-verification for {member.mention}. "
+                                f"The configured `verified_role_id` ({role.mention}) is not safe: {safe_err}"
+                            ),
+                            level="ERROR",
+                        )
+                    elif not is_high_enough:
+                        await self.bot.log_admin_warning(
+                            guild_id=GuildId(member.guild.id),
+                            warning_type="role_hierarchy",
+                            description=(
+                                f"**Failed** auto-verification for {member.mention}. "
+                                f"I cannot assign the `verified_role_id` ({role.mention}): {hier_err}"
+                            ),
+                            level="ERROR",
+                        )
+                    else:
+                        # All checks passed, assign the role
+                        await member.add_roles(role, reason="Auto verified")
 
         if not config.join_leave_log_channel_id:
             return  # This guild hasn't configured this feature, so we do nothing.

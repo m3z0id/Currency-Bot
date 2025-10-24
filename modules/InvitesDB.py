@@ -28,8 +28,9 @@ API_HEADERS = {
 class InvitesDB:
     """Manages all database and API interactions for invite tracking."""
 
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, session: aiohttp.ClientSession) -> None:
         self.database = database
+        self.http_session = session
 
     async def post_init(self) -> None:
         """Initialize the database table for invites."""
@@ -90,6 +91,54 @@ class InvitesDB:
             await conn.commit()
             return cursor.rowcount == 1
 
+    async def sync_invite(
+        self,
+        invitee_id: UserId,
+        inviter_id: InviterId,
+        guild_id: GuildId,
+        joined_at: str | None,
+    ) -> bool:
+        """Insert a new invite record or update an existing one.
+
+        This is used by the sync command to correct data from the API.
+        Returns True if a row was inserted or updated, False otherwise.
+        """
+        if invitee_id == inviter_id:
+            return False  # Ignore self-invites
+
+        async with self.database.get_conn() as conn:
+            # We must provide a join date. If the API gives none,
+            # we let the database use its default.
+            if joined_at:
+                sql = """
+                    INSERT INTO invites (invitee_id, guild_id, inviter_id, joined_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(invitee_id, guild_id) DO UPDATE SET
+                        inviter_id = excluded.inviter_id,
+                        joined_at = excluded.joined_at
+                    WHERE
+                        -- Only update if data is actually different
+                        invites.inviter_id IS NOT excluded.inviter_id OR
+                        invites.joined_at IS NOT excluded.joined_at;
+                """
+                params: tuple[int | str | None, ...] = (invitee_id, guild_id, inviter_id, joined_at)
+            else:
+                # API didn't provide a join date, just update inviter
+                sql = """
+                    INSERT INTO invites (invitee_id, guild_id, inviter_id)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(invitee_id, guild_id) DO UPDATE SET
+                        inviter_id = excluded.inviter_id
+                    WHERE
+                        invites.inviter_id IS NOT excluded.inviter_id;
+                """
+                params = (invitee_id, guild_id, inviter_id)
+
+            cursor = await conn.execute(sql, params)
+            await conn.commit()
+            # rowcount will be > 0 for a successful INSERT or UPDATE
+            return cursor.rowcount > 0
+
     async def get_all_invitee_ids(self, guild_id: GuildId) -> set[UserId]:
         """Retrieve a set of all user IDs that have been invited in a guild."""
         async with self.database.get_cursor() as cursor:
@@ -143,10 +192,7 @@ class InvitesDB:
         payload = {"query": username, "limit": 5}
 
         try:
-            async with (
-                aiohttp.ClientSession(headers=API_HEADERS) as session,
-                session.get(api_url, params=payload) as resp,
-            ):
+            async with self.http_session.get(api_url, params=payload, headers=API_HEADERS) as resp:
                 resp.raise_for_status()
                 members = await resp.json()
                 if not members:
@@ -163,10 +209,7 @@ class InvitesDB:
         # This endpoint uses POST with an empty query to return all members.
         payload = {"limit": 1000}
         try:
-            async with (
-                aiohttp.ClientSession(headers=API_HEADERS) as session,
-                session.post(api_url, json=payload) as resp,
-            ):
+            async with self.http_session.post(api_url, json=payload, headers=API_HEADERS) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
                 return data.get("members", [])

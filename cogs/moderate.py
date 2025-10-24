@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
 
 from modules.dtypes import GuildId
+from modules.security_utils import SecurityCheckError, validate_bot_hierarchy, validate_moderation_action
 
 log = logging.getLogger(__name__)
 
@@ -72,44 +73,21 @@ class Moderate(commands.Cog):
         guild_only=True,
     )
 
-    # REFACTOR: Centralized check to handle common moderation validations.
-    async def _pre_action_checks(self, interaction: discord.Interaction, member: discord.Member) -> bool:
+    async def _pre_action_checks(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ) -> bool:
         """Perform common checks before any moderation action.
 
         Returns True if all checks pass, False otherwise.
         """
-        # Edge Case: Check if moderator is trying to act on themselves.
-        if member.id == interaction.user.id:
-            await interaction.response.send_message("You cannot perform this action on yourself.", ephemeral=True)
-            return False
-
-        # Edge Case: Check if moderator is trying to act on the bot.
-        if member.id == self.bot.user.id:
-            await interaction.response.send_message("You cannot perform this action on me.", ephemeral=True)
-            return False
-
-        # Edge Case: Check if moderator is trying to act on the guild owner.
-        if member.id == interaction.guild.owner_id:
-            await interaction.response.send_message(
-                "You cannot perform moderation actions on the server owner.",
-                ephemeral=True,
-            )
-            return False
-
-        # Role Hierarchy Check: Ensure moderator's role is higher than the target's.
-        if member.top_role >= interaction.user.top_role and interaction.guild.owner_id != interaction.user.id:
-            await interaction.response.send_message(
-                "You cannot moderate a member with an equal or higher role.",
-                ephemeral=True,
-            )
-            return False
-
-        # Bot Hierarchy Check: Ensure the bot's role is higher than the target's.
-        if member.top_role >= interaction.guild.me.top_role:
-            await interaction.response.send_message(
-                "I cannot perform this action because my highest role is lower than the target member's role.",
-                ephemeral=True,
-            )
+        try:
+            # Call the single, centralized validator
+            validate_moderation_action(interaction, member)
+        except SecurityCheckError as e:
+            # Send the specific error message from the validator
+            await interaction.response.send_message(str(e), ephemeral=True)
             return False
 
         return True
@@ -127,7 +105,11 @@ class Moderate(commands.Cog):
             title=f"You have been {action} in {interaction.guild.name}",
             color=discord.Colour.red(),
         )
-        embed.add_field(name="Reason", value=reason or "No reason provided.", inline=False)
+        embed.add_field(
+            name="Reason",
+            value=reason or "No reason provided.",
+            inline=False,
+        )
         if duration:
             embed.add_field(name="Duration", value=duration, inline=False)
         embed.set_footer(text=f"Moderator: {interaction.user.display_name}")
@@ -156,7 +138,11 @@ class Moderate(commands.Cog):
         interaction: discord.Interaction,
         member: discord.Member,
         reason: str | None = None,
-        delete_messages: Literal["Don't delete any", "Last 24 hours", "Last 7 days"] = "Don't delete any",
+        delete_messages: Literal[
+            "Don't delete any",
+            "Last 24 hours",
+            "Last 7 days",
+        ] = "Don't delete any",
         notify_member: bool = True,
     ) -> None:
         """Bans a member and optionally deletes their recent messages."""
@@ -174,7 +160,10 @@ class Moderate(commands.Cog):
 
         try:
             await member.ban(reason=reason, delete_message_seconds=delete_seconds)
-            await interaction.response.send_message(f"✅ **{member.display_name}** has been banned.", ephemeral=True)
+            await interaction.response.send_message(
+                f"✅ **{member.display_name}** has been banned.",
+                ephemeral=True,
+            )
             log.info("%s banned %s for: %s", interaction.user, member, reason)
         except discord.Forbidden:
             await interaction.response.send_message(
@@ -182,7 +171,10 @@ class Moderate(commands.Cog):
                 ephemeral=True,
             )
         except discord.HTTPException as e:
-            await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True)
+            await interaction.response.send_message(
+                f"An error occurred: {e}",
+                ephemeral=True,
+            )
             log.exception("Failed to ban %s", member)
 
     @moderate.command(name="kick", description="Kicks a member from the server.")
@@ -203,7 +195,10 @@ class Moderate(commands.Cog):
 
         try:
             await member.kick(reason=reason)
-            await interaction.response.send_message(f"✅ **{member.display_name}** has been kicked.", ephemeral=True)
+            await interaction.response.send_message(
+                f"✅ **{member.display_name}** has been kicked.",
+                ephemeral=True,
+            )
             log.info("%s kicked %s for: %s", interaction.user, member, reason)
         except discord.Forbidden:
             await interaction.response.send_message(
@@ -211,11 +206,19 @@ class Moderate(commands.Cog):
                 ephemeral=True,
             )
         except discord.HTTPException as e:
-            await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True)
+            await interaction.response.send_message(
+                f"An error occurred: {e}",
+                ephemeral=True,
+            )
             log.exception("Failed to kick %s", member)
 
-    @moderate.command(name="timeout", description="Times out a member for a specified duration.")
-    @app_commands.describe(duration="Duration of the timeout (e.g., 10m, 1h, 3d). Max 28 days.")
+    @moderate.command(
+        name="timeout",
+        description="Times out a member for a specified duration.",
+    )
+    @app_commands.describe(
+        duration="Duration of the timeout (e.g., 10m, 1h, 3d). Max 28 days.",
+    )
     @app_commands.checks.has_permissions(mute_members=True)
     async def timeout(
         self,
@@ -260,7 +263,10 @@ class Moderate(commands.Cog):
                 ephemeral=True,
             )
         except discord.HTTPException as e:
-            await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True)
+            await interaction.response.send_message(
+                f"An error occurred: {e}",
+                ephemeral=True,
+            )
             log.exception("Failed to timeout %s", member)
 
     # NEW: Command to remove a timeout.
@@ -278,7 +284,10 @@ class Moderate(commands.Cog):
             return
 
         if not member.is_timed_out():
-            await interaction.response.send_message("This member is not currently timed out.", ephemeral=True)
+            await interaction.response.send_message(
+                "This member is not currently timed out.",
+                ephemeral=True,
+            )
             return
 
         if notify_member:
@@ -302,10 +311,16 @@ class Moderate(commands.Cog):
                 ephemeral=True,
             )
         except discord.HTTPException as e:
-            await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True)
+            await interaction.response.send_message(
+                f"An error occurred: {e}",
+                ephemeral=True,
+            )
             log.exception("Failed to untimeout %s", member)
 
-    @moderate.command(name="mute", description="Mutes a member by assigning the muted role.")
+    @moderate.command(
+        name="mute",
+        description="Mutes a member by assigning the muted role.",
+    )
     @app_commands.checks.has_permissions(manage_roles=True)
     async def mute(
         self,
@@ -318,7 +333,9 @@ class Moderate(commands.Cog):
         if not await self._pre_action_checks(interaction, member):
             return
 
-        config = await self.bot.config_db.get_guild_config(GuildId(interaction.guild.id))
+        config = await self.bot.config_db.get_guild_config(
+            GuildId(interaction.guild.id),
+        )
         muted_role_id = config.muted_role_id
         if not muted_role_id:
             await interaction.response.send_message(
@@ -343,8 +360,21 @@ class Moderate(commands.Cog):
             )
             return
 
+        try:
+            # This is the missing check.
+            validate_bot_hierarchy(interaction, muted_role)
+        except SecurityCheckError as e:
+            await interaction.response.send_message(
+                f"❌ **Configuration Error:**\n{e}",
+                ephemeral=True,
+            )
+            return
+
         if muted_role in member.roles:
-            await interaction.response.send_message("This member is already muted.", ephemeral=True)
+            await interaction.response.send_message(
+                "This member is already muted.",
+                ephemeral=True,
+            )
             return
 
         if notify_member:
@@ -352,7 +382,10 @@ class Moderate(commands.Cog):
 
         try:
             await member.add_roles(muted_role, reason=reason)
-            await interaction.response.send_message(f"✅ **{member.display_name}** has been muted.", ephemeral=True)
+            await interaction.response.send_message(
+                f"✅ **{member.display_name}** has been muted.",
+                ephemeral=True,
+            )
             log.info("%s muted %s. Reason: %s", interaction.user, member, reason)
         except discord.Forbidden:
             await interaction.response.send_message(
@@ -360,10 +393,16 @@ class Moderate(commands.Cog):
                 ephemeral=True,
             )
         except discord.HTTPException as e:
-            await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True)
+            await interaction.response.send_message(
+                f"An error occurred: {e}",
+                ephemeral=True,
+            )
             log.exception("Failed to mute %s", member)
 
-    @moderate.command(name="unmute", description="Unmutes a member by removing the muted role.")
+    @moderate.command(
+        name="unmute",
+        description="Unmutes a member by removing the muted role.",
+    )
     @app_commands.checks.has_permissions(manage_roles=True)
     async def unmute(
         self,
@@ -377,7 +416,9 @@ class Moderate(commands.Cog):
         if not await self._pre_action_checks(interaction, member):
             return
 
-        config = await self.bot.config_db.get_guild_config(GuildId(interaction.guild.id))
+        config = await self.bot.config_db.get_guild_config(
+            GuildId(interaction.guild.id),
+        )
         muted_role_id = config.muted_role_id
         if not muted_role_id:
             await interaction.response.send_message(
@@ -393,8 +434,21 @@ class Moderate(commands.Cog):
             )
             return
 
+        try:
+            # This is the missing check.
+            validate_bot_hierarchy(interaction, muted_role)
+        except SecurityCheckError as e:
+            await interaction.response.send_message(
+                f"❌ **Configuration Error:**\n{e}",
+                ephemeral=True,
+            )
+            return
+
         if muted_role not in member.roles:
-            await interaction.response.send_message("This member is not currently muted.", ephemeral=True)
+            await interaction.response.send_message(
+                "This member is not currently muted.",
+                ephemeral=True,
+            )
             return
 
         if notify_member:
@@ -402,7 +456,10 @@ class Moderate(commands.Cog):
 
         try:
             await member.remove_roles(muted_role, reason=reason)
-            await interaction.response.send_message(f"✅ **{member.display_name}** has been unmuted.", ephemeral=True)
+            await interaction.response.send_message(
+                f"✅ **{member.display_name}** has been unmuted.",
+                ephemeral=True,
+            )
             log.info("%s unmuted %s. Reason: %s", interaction.user, member, reason)
         except discord.Forbidden:
             await interaction.response.send_message(
@@ -410,7 +467,10 @@ class Moderate(commands.Cog):
                 ephemeral=True,
             )
         except discord.HTTPException as e:
-            await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True)
+            await interaction.response.send_message(
+                f"An error occurred: {e}",
+                ephemeral=True,
+            )
             log.exception("Failed to unmute %s", member)
 
 

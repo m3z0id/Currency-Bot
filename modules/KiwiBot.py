@@ -3,26 +3,22 @@ import pathlib
 import time
 from typing import ClassVar, Final, Literal
 
+import aiohttp
 import discord
 from discord import Forbidden, HTTPException, MissingApplicationID
 from discord.app_commands import CommandSyncFailure, TranslationError
 from discord.ext import commands
-from discord.ext.commands import (
-    ExtensionAlreadyLoaded,
-    ExtensionFailed,
-    ExtensionNotFound,
-    NoEntryPointError,
-)
+from discord.ext.commands import ExtensionAlreadyLoaded, ExtensionFailed, ExtensionNotFound, NoEntryPointError
 
 from modules.config import BotConfig
 from modules.ConfigDB import ConfigDB
+from modules.CurrencyLedgerDB import CurrencyLedgerDB
 from modules.Database import Database
 from modules.dtypes import GuildId
 from modules.InvitesDB import InvitesDB
 from modules.server_admin import ServerManager
 from modules.TaskDB import TaskDB
 from modules.trading_logic import TradingLogic
-from modules.TransactionsDB import TransactionsDB
 from modules.UserDB import UserDB
 
 log = logging.getLogger(__name__)
@@ -44,6 +40,7 @@ class KiwiBot(commands.Bot):
             intents=intents,
             help_command=None,
         )
+        self.http_session: aiohttp.ClientSession | None = None
         self.server_manager: ServerManager | None = None
         self._warning_cooldowns: dict[str, float] = {}
         self.trading_logic: TradingLogic | None = None
@@ -52,12 +49,15 @@ class KiwiBot(commands.Bot):
     async def setup_hook(self) -> None:
         log.info("Logged in as %s", self.user)
 
+        # Create the shared session
+        self.http_session = aiohttp.ClientSession()
+
         # Initialize the database first
         self.database: Database = Database()
         self.user_db = UserDB(self.database)
         self.task_db = TaskDB(self.database)
-        self.invites_db = InvitesDB(self.database)
-        self.transactions_db = TransactionsDB(self.database)
+        self.invites_db = InvitesDB(self.database, self.http_session)
+        self.ledger_db = CurrencyLedgerDB(self.database)
         self.config_db = ConfigDB(self.database)
 
         # Initialize TradingLogic if API key is present
@@ -65,7 +65,9 @@ class KiwiBot(commands.Bot):
             self.trading_logic = TradingLogic(
                 self.database,
                 self.user_db,
+                self.ledger_db,
                 self.config.twelvedata_api_key,
+                self.http_session,
             )
             log.info("TradingLogic initialized.")
         else:
@@ -78,7 +80,7 @@ class KiwiBot(commands.Bot):
         await self.user_db.post_init()
         await self.task_db.post_init()
         await self.invites_db.post_init()
-        await self.transactions_db.post_init()
+        await self.ledger_db.post_init()
         await self.config_db.post_init()
 
         # Create the portfolios table
@@ -100,7 +102,9 @@ class KiwiBot(commands.Bot):
                 if file.is_file():
                     # Skip loading paper_trading if logic isn't available
                     if file.stem == "paper_trading" and not self.trading_logic:
-                        log.warning("Skipping load of cogs.paper_trading: API key not configured.")
+                        log.warning(
+                            "Skipping load of cogs.paper_trading: API key not configured.",
+                        )
                         continue
 
                     # Try to load each extension individually
@@ -118,7 +122,11 @@ class KiwiBot(commands.Bot):
 
             # Sync commands AFTER attempting to load all cogs
             synced = await self.tree.sync()  # Sync global slash commands with Discord
-            log.info("Synced %d global command(s) %s", len(synced), [i.name for i in synced])
+            log.info(
+                "Synced %d global command(s) %s",
+                len(synced),
+                [i.name for i in synced],
+            )
         except (
             HTTPException,
             CommandSyncFailure,
@@ -292,5 +300,9 @@ class KiwiBot(commands.Bot):
                 None,
                 None,
             )  # Ensure graceful shutdown
+
+        if self.http_session:
+            await self.http_session.close()
+            log.info("Closed shared aiohttp session.")
         log.info("Closing bot gracefully.")
         await super().close()

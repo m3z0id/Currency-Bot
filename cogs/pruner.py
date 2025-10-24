@@ -6,6 +6,7 @@ from discord.ext import commands, tasks
 
 from modules.dtypes import GuildId
 from modules.KiwiBot import KiwiBot
+from modules.security_utils import is_bot_hierarchy_sufficient
 from modules.UserDB import UserDB
 
 if TYPE_CHECKING:
@@ -33,20 +34,30 @@ class PrunerCog(commands.Cog):
         self.prune_loop.cancel()
 
     @tasks.loop(hours=1)
-    async def prune_loop(self) -> None:
+    async def prune_loop(self) -> None:  # noqa: PLR0912
         """Check for and prune inactive members."""
-        log.info("Running automatic prune check for inactive members across all guilds...")
+        log.info(
+            "Running automatic prune check for inactive members across all guilds...",
+        )
 
         for guild in self.bot.guilds:
-            config: GuildConfig = await self.bot.config_db.get_guild_config(GuildId(guild.id))
+            config: GuildConfig = await self.bot.config_db.get_guild_config(
+                GuildId(guild.id),
+            )
             roles_to_prune = config.roles_to_prune
             inactivity_days = config.inactivity_days
 
             if not roles_to_prune:
-                log.debug("Skipping prune for guild '%s': No roles configured for pruning.", guild.name)
+                log.debug(
+                    "Skipping prune for guild '%s': No roles configured for pruning.",
+                    guild.name,
+                )
                 continue
             if not inactivity_days or inactivity_days <= 0:
-                log.debug("Skipping prune for guild '%s': Inactivity days not configured or invalid.", guild.name)
+                log.debug(
+                    "Skipping prune for guild '%s': Inactivity days not configured or invalid.",
+                    guild.name,
+                )
                 continue
 
             # Fetch roles from the guild that are configured for pruning
@@ -60,9 +71,17 @@ class PrunerCog(commands.Cog):
                 continue
 
             # Get inactive user IDs from the database
-            inactive_user_ids = set(await self.user_db.get_inactive_users(GuildId(guild.id), inactivity_days))
+            inactive_user_ids = set(
+                await self.user_db.get_inactive_users(
+                    GuildId(guild.id),
+                    inactivity_days,
+                ),
+            )
             if not inactive_user_ids:
-                log.debug("No inactive users found in the database to prune for guild '%s'.", guild.name)
+                log.debug(
+                    "No inactive users found in the database to prune for guild '%s'.",
+                    guild.name,
+                )
                 continue
 
             total_members_pruned = 0
@@ -85,16 +104,31 @@ class PrunerCog(commands.Cog):
                 # Remove duplicates in case a gradient role was already in prunable_roles
                 roles_to_remove = [r for r in set(roles_to_remove) if not r.managed]
 
-                if roles_to_remove:
+                safe_roles_to_remove = []
+                for role in roles_to_remove:
+                    is_high_enough, hier_err = is_bot_hierarchy_sufficient(guild, role)
+                    if is_high_enough:
+                        safe_roles_to_remove.append(role)
+                    else:
+                        # Log a warning for the specific role that failed
+                        await self.bot.log_admin_warning(
+                            guild_id=GuildId(guild.id),
+                            warning_type="prune_permission",
+                            description=(f"I failed to prune role {role.mention} from {member.mention}. Reason: {hier_err}"),
+                            level="ERROR",
+                        )
+
+                if safe_roles_to_remove:  # Use the filtered list
                     try:
                         await member.remove_roles(
-                            *roles_to_remove,
+                            *safe_roles_to_remove,  # Only attempt to remove roles we can manage
                             reason=f"Pruned for {inactivity_days}+ days of inactivity.",
                         )
-                        role_names = ", ".join(f"'{r.name}'" for r in roles_to_remove)
+                        role_names = ", ".join(f"'{r.name}'" for r in safe_roles_to_remove)
                         log.info("Pruned %s from %s.", role_names, member.display_name)
                         total_members_pruned += 1
                     except Forbidden:
+                        # This "shouldn't" be hit for hierarchy anymore, but good as a fallback
                         log.exception(
                             "Failed to prune %s: Missing Permissions.",
                             member.display_name,

@@ -42,7 +42,10 @@ class BumpHandlerCog(commands.Cog):
 
         This method is idempotent and can handle reconnections.
         """
-        log.info("BumpHandlerCog loaded. Searching for the last bump in %s", self.bot.guilds)
+        log.info(
+            "BumpHandlerCog loaded. Searching for the last bump in %s guilds.",
+            len(self.bot.guilds),
+        )
         for guild in self.bot.guilds:
             last_bump_message = await self._find_last_bump_message(guild)
             if last_bump_message:

@@ -1,4 +1,5 @@
 import logging
+from typing import Final
 
 import discord
 from discord import app_commands
@@ -9,6 +10,7 @@ from modules.enums import StatName
 from modules.KiwiBot import KiwiBot
 
 log = logging.getLogger(__name__)
+SECOND_COOLDOWN: Final[int] = 1
 
 
 class Bal(commands.Cog):
@@ -18,6 +20,7 @@ class Bal(commands.Cog):
         self.bot = bot
 
     @commands.hybrid_command(name="bal", description="Displays a user's balance")
+    @commands.cooldown(2, SECOND_COOLDOWN, commands.BucketType.user)
     @app_commands.describe(member="User whose balance to show")
     async def bal(self, ctx: commands.Context, member: discord.Member | None = None) -> None:
         # If no member is provided, default to the command author.

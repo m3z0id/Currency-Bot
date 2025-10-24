@@ -7,6 +7,7 @@ from discord.ext import commands
 
 from modules.dtypes import GuildId, UserId
 from modules.KiwiBot import KiwiBot
+from modules.security_utils import SecurityCheckError, validate_bot_hierarchy, validate_role_safety
 
 log = logging.getLogger(__name__)
 
@@ -336,6 +337,29 @@ class Config(
         if not interaction.guild_id:
             return
 
+        if role:
+            # Define which roles must be cosmetic (no permissions)
+            cosmetic_features = [
+                "bumper_role_id",
+                "backup_bumper_role_id",
+                "tag_role_id",
+                "xp_opt_out_role_id",
+            ]
+            require_no_perms = feature.value in cosmetic_features
+
+            try:
+                # Run our centralized security checks
+                validate_role_safety(role, require_no_permissions=require_no_perms)
+                validate_bot_hierarchy(interaction, role)
+
+            except SecurityCheckError as e:
+                # Catch a failed check and report it to the admin
+                await interaction.response.send_message(
+                    f"❌ **Configuration Blocked:**\n{e}",
+                    ephemeral=True,
+                )
+                return
+
         value = role.id if role else None
         await self.bot.config_db.set_setting(
             GuildId(interaction.guild_id),
@@ -516,9 +540,9 @@ class Config(
 
     @prune.command(
         name="add-role",
-        description="Add a role to the list of roles to be pruned from inactive members.",
+        description="Add a (cosmetic) role to be pruned from inactive members.",
     )
-    @app_commands.describe(role="The role to add to the prune list.")
+    @app_commands.describe(role="The (cosmetic) role to add to the prune list.")
     async def add_prune_role(
         self,
         interaction: discord.Interaction,
@@ -526,6 +550,14 @@ class Config(
     ) -> None:
         """Add a role to the prune list."""
         if not interaction.guild_id:
+            return
+
+        try:
+            # Prunable roles must be cosmetic and manageable
+            validate_role_safety(role, require_no_permissions=True)
+            validate_bot_hierarchy(interaction, role)
+        except SecurityCheckError as e:
+            await interaction.response.send_message(f"❌ **Configuration Blocked:**\n{e}", ephemeral=True)
             return
 
         guild_id = GuildId(interaction.guild_id)

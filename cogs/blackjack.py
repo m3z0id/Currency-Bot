@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from enum import Enum, auto
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Final
 
 import discord
 from blackjack21 import Card, Dealer, Player, PlayerBase, Table
@@ -16,7 +16,10 @@ from modules.enums import StatName
 if TYPE_CHECKING:
     from discord import Interaction
 
+    from modules.CurrencyLedgerDB import EventReason
     from modules.KiwiBot import KiwiBot
+
+SECOND_COOLDOWN: Final[int] = 1
 
 
 # --- Enums and Constants ---
@@ -44,11 +47,36 @@ DEALER_WIN_RESULT = -1
 
 # --- Result Configuration ---
 RESULT_CONFIG = {
-    GameResult.WIN: {"stat": "wins", "net_mult": 1.0, "payout_mult": 2.0},
-    GameResult.BLACKJACK: {"stat": "blackjacks", "net_mult": 1.5, "payout_mult": 2.5},
-    GameResult.LOSS: {"stat": "losses", "net_mult": -1.0, "payout_mult": 0.0},
-    GameResult.SURRENDER: {"stat": "losses", "net_mult": -0.5, "payout_mult": 0.5},
-    GameResult.PUSH: {"stat": "pushes", "net_mult": 0.0, "payout_mult": 1.0},
+    GameResult.WIN: {
+        "stat": "wins",
+        "net_mult": 1.0,
+        "payout_mult": 2.0,
+        "reason": "BLACKJACK_WIN",
+    },
+    GameResult.BLACKJACK: {
+        "stat": "blackjacks",
+        "net_mult": 1.5,
+        "payout_mult": 2.5,
+        "reason": "BLACKJACK_BLACKJACK",
+    },
+    GameResult.LOSS: {
+        "stat": "losses",
+        "net_mult": -1.0,
+        "payout_mult": 0.0,
+        "reason": None,
+    },
+    GameResult.SURRENDER: {
+        "stat": "losses",
+        "net_mult": -0.5,
+        "payout_mult": 0.5,
+        "reason": "BLACKJACK_SURRENDER_RETURN",
+    },
+    GameResult.PUSH: {
+        "stat": "pushes",
+        "net_mult": 0.0,
+        "payout_mult": 1.0,
+        "reason": "BLACKJACK_PUSH",
+    },
 }
 
 
@@ -133,7 +161,7 @@ class BlackjackView(discord.ui.View):
             if isinstance(item, discord.ui.Button):
                 item.disabled = is_disabled
 
-    async def _check_and_charge(
+    async def check_and_charge(
         self,
         interaction: Interaction,
         amount: int,
@@ -141,21 +169,44 @@ class BlackjackView(discord.ui.View):
     ) -> bool:
         """Check if the user can afford an action and deduct the amount."""
         user_id = UserId(interaction.user.id)
-        guild_id = GuildId(interaction.guild.id)
-        if (balance := await self.bot.user_db.get_stat(user_id, guild_id, StatName.CURRENCY)) < amount:
+        guild_id = GuildId(interaction.guild.id)  # pyright: ignore[reportArgumentType]
+
+        # --- DETERMINE LEDGER REASON ---
+        reason: EventReason
+        if action_name == "double down":
+            reason = "BLACKJACK_DOUBLE_DOWN"
+        elif action_name == "split":
+            reason = "BLACKJACK_SPLIT"
+        else:
+            # Fallback, though this shouldn't be hit
+            reason = "BLACKJACK_BET"  # pyright: ignore[reportConstantRedefinition]
+
+        new_balance = await self.bot.user_db.burn_currency(
+            user_id=user_id,
+            guild_id=guild_id,
+            amount=PositiveInt(amount),
+            event_reason=reason,
+            ledger_db=self.bot.ledger_db,
+            initiator_id=user_id,
+        )
+
+        if new_balance is None:
+            # Get the balance *after* the failed burn for the error message
+            balance = await self.bot.user_db.get_stat(
+                user_id,
+                guild_id,
+                StatName.CURRENCY,
+            )
             await interaction.response.send_message(
                 f"You don't have enough credits to {action_name}. You need ${amount:,} but only have ${balance:,}.",
                 ephemeral=True,
             )
             return False
 
-        # This now returns None on failure (insufficient funds), so we check that.
-        # The check is technically redundant because get_stat already checked,
-        # but it's the correct pattern for using the new atomic method.
-        return await self.bot.user_db.decrement_stat(user_id, guild_id, StatName.CURRENCY, PositiveInt(amount)) is not None
+        return True
 
     # --- Game Flow & Logic ---
-    async def _resolve_payout_and_stats(
+    async def resolve_payout_and_stats(
         self,
         result: GameResult,
         bet_amount: int,
@@ -166,7 +217,7 @@ class BlackjackView(discord.ui.View):
             return
 
         # --- 1. Update In-Memory Stats ---
-        guild_id = GuildId(self.user.guild.id)
+        guild_id = GuildId(self.user.guild.id)  # pyright: ignore[reportArgumentType]
         user_id = UserId(self.user.id)
 
         # These lines are no longer needed thanks to defaultdict:
@@ -180,8 +231,17 @@ class BlackjackView(discord.ui.View):
 
         # --- 2. Process Database Payout ---
         payout = int(bet_amount * config["payout_mult"])
-        if payout > 0:
-            await self.bot.user_db.increment_stat(user_id, guild_id, StatName.CURRENCY, payout)
+        payout_reason = config.get("reason")  # Get the new reason from our config
+
+        if payout > 0 and payout_reason:
+            await self.bot.user_db.mint_currency(
+                user_id=user_id,
+                guild_id=guild_id,
+                amount=PositiveInt(payout),
+                event_reason=payout_reason,  # pyright: ignore[reportArgumentType]
+                ledger_db=self.bot.ledger_db,
+                initiator_id=user_id,
+            )
 
     def _end_game(self) -> None:
         """Determine winner, sets outcome message, and calls for payout/stat updates."""
@@ -212,7 +272,7 @@ class BlackjackView(discord.ui.View):
 
         main_text, main_result = get_result(self.player, self.player.bet)
         asyncio.create_task(  # noqa: RUF006
-            self._resolve_payout_and_stats(main_result, self.player.bet),
+            self.resolve_payout_and_stats(main_result, self.player.bet),
         )
 
         if self.player.split:
@@ -221,7 +281,7 @@ class BlackjackView(discord.ui.View):
                 self.player.split.bet,
             )
             asyncio.create_task(  # noqa: RUF006
-                self._resolve_payout_and_stats(split_result, self.player.split.bet),
+                self.resolve_payout_and_stats(split_result, self.player.split.bet),
             )
             self.outcome_message = f"{main_text}\n{split_text}"
         else:
@@ -351,7 +411,11 @@ class DoubleDownButton(discord.ui.Button["BlackjackView"]):
 
     async def callback(self, interaction: Interaction) -> None:
         view = self.view
-        if not await view._check_and_charge(interaction, view.initial_bet, "double down"):  # noqa: SLF001
+        if not await view.check_and_charge(
+            interaction,
+            view.initial_bet,
+            "double down",
+        ):
             return
 
         card = view.player.play_double_down()
@@ -365,7 +429,11 @@ class SplitButton(discord.ui.Button["BlackjackView"]):
 
     async def callback(self, interaction: Interaction) -> None:
         view = self.view
-        if not await view._check_and_charge(interaction, view.initial_bet, "split"):  # noqa: SLF001
+        if not await view.check_and_charge(
+            interaction,
+            view.initial_bet,
+            "split",
+        ):
             return
 
         if view.player.can_split:
@@ -389,7 +457,10 @@ class SurrenderButton(discord.ui.Button["BlackjackView"]):
         view.player._bust = True  # Internal way to mark a loss  # noqa: SLF001
         view.disable_all_buttons(True)
 
-        await view._resolve_payout_and_stats(GameResult.SURRENDER, view.initial_bet)  # noqa: SLF001
+        await view.resolve_payout_and_stats(
+            GameResult.SURRENDER,
+            view.initial_bet,
+        )
         view._update_buttons()  # noqa: SLF001
         await interaction.response.edit_message(embed=view.create_embed(), view=view)
 
@@ -402,21 +473,34 @@ class PlayAgainButton(discord.ui.Button["BlackjackView"]):
     async def callback(self, interaction: Interaction) -> None:
         view = self.view
         user_id = UserId(interaction.user.id)
-        guild_id = GuildId(interaction.guild.id)
-        if (balance := await view.bot.user_db.get_stat(user_id, guild_id, StatName.CURRENCY)) < self.bet:
+        guild_id = GuildId(interaction.guild.id)  # pyright: ignore[reportArgumentType]
+        new_balance = await view.bot.user_db.burn_currency(
+            user_id=user_id,
+            guild_id=guild_id,
+            amount=PositiveInt(self.bet),
+            event_reason="BLACKJACK_BET",
+            ledger_db=view.bot.ledger_db,
+            initiator_id=user_id,
+        )
+
+        if new_balance is None:
+            balance = await view.bot.user_db.get_stat(
+                user_id,
+                guild_id,
+                StatName.CURRENCY,
+            )
             await interaction.response.edit_message(
                 content=f"You can't play again. You need ${self.bet:,} but only have ${balance:,}.",
                 embed=None,
                 view=None,
             )
             return
-
-        await view.bot.user_db.decrement_stat(user_id, guild_id, StatName.CURRENCY, PositiveInt(self.bet))
         new_view = BlackjackView(view.bot, interaction.user, self.bet)
         await interaction.response.edit_message(
             embed=new_view.create_embed(),
             view=new_view,
         )
+        # --- END OF REPLACEMENT ---
 
 
 class NewBetButton(discord.ui.Button["BlackjackView"]):
@@ -468,18 +552,36 @@ class BlackjackCog(commands.Cog):
         name="blackjack",
         description="Start a game of Blackjack.",
     )
+    @commands.cooldown(1, SECOND_COOLDOWN * 10, commands.BucketType.user)
     @app_commands.describe(bet="The amount of credits you want to bet.")
-    async def blackjack(self, ctx: commands.Context, bet: commands.Range[int, 1]) -> None:  # ty: ignore [invalid-type-form]
+    async def blackjack(
+        self,
+        ctx: commands.Context,
+        bet: commands.Range[int, 1],  # ty: ignore [invalid-type-form]
+    ) -> None:  # ty: ignore [invalid-type-form]
         user_id = UserId(ctx.author.id)
-        guild_id = GuildId(ctx.guild.id)
-        if (balance := await self.bot.user_db.get_stat(user_id, guild_id, StatName.CURRENCY)) < bet:
+        guild_id = GuildId(ctx.guild.id)  # pyright: ignore[reportArgumentType]
+        new_balance = await self.bot.user_db.burn_currency(
+            user_id=user_id,
+            guild_id=guild_id,
+            amount=PositiveInt(bet),
+            event_reason="BLACKJACK_BET",
+            ledger_db=self.bot.ledger_db,
+            initiator_id=user_id,
+        )
+
+        if new_balance is None:
+            balance = await self.bot.user_db.get_stat(
+                user_id,
+                guild_id,
+                StatName.CURRENCY,
+            )
             await ctx.send(
                 f"Insufficient funds! You tried to bet ${bet:,} but only have ${balance:,}.",
                 ephemeral=True,
             )
             return
 
-        await self.bot.user_db.decrement_stat(user_id, guild_id, StatName.CURRENCY, PositiveInt(bet))
         view = BlackjackView(self.bot, ctx.author, bet)
         await ctx.send(embed=view.create_embed(), view=view, ephemeral=False)
 
@@ -487,6 +589,7 @@ class BlackjackCog(commands.Cog):
         name="blackjack-stats",
         description="View your blackjack statistics for this server.",
     )
+    @commands.cooldown(1, SECOND_COOLDOWN * 10, commands.BucketType.user)
     async def blackjack_stats(self, ctx: commands.Context) -> None:
         stats = self.bot.blackjack_stats.get(ctx.guild.id, {}).get(ctx.author.id)
         if not stats:
@@ -513,6 +616,7 @@ class BlackjackCog(commands.Cog):
         name="blackjack-leaderboard",
         description="View the server's blackjack leaderboard.",
     )
+    @commands.cooldown(1, SECOND_COOLDOWN * 10, commands.BucketType.user)
     async def blackjack_leaderboard(self, ctx: commands.Context) -> None:
         guild_stats = self.bot.blackjack_stats.get(ctx.guild.id)
         if not guild_stats:

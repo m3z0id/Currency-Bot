@@ -11,6 +11,7 @@ from discord.ext import commands
 
 from modules.dtypes import AnalysisStatus, GuildId, MessageId, is_guild_message
 from modules.KiwiBot import KiwiBot
+from modules.security_utils import is_bot_hierarchy_sufficient, is_role_safe
 
 # A structured dictionary for analysis results, improving code clarity.
 
@@ -142,28 +143,30 @@ class ReactionRoles(commands.Cog):
                 )
                 continue
 
-            # 4. Security Check: Role must have NO permissions.
-            if role.permissions.value != 0:
+            # 4. Security Check: Use centralized boolean function
+            is_safe, error_msg = is_role_safe(role, require_no_permissions=True)
+            if not is_safe:
                 results.append(
                     {
                         "status": "ERROR",
                         "line_content": clean_line,
                         "emoji_str": emoji_str,
                         "role": role,
-                        "error_message": "Role has permissions and will be ignored for security.",
+                        "error_message": error_msg,  # Use the message from our util
                     },
                 )
                 continue
 
-            # 5. Bot Hierarchy Check
-            if message.guild.me.top_role <= role:
+            # 5. Bot Hierarchy Check: Use centralized boolean function
+            is_sufficient, error_msg = is_bot_hierarchy_sufficient(message.guild, role)
+            if not is_sufficient:
                 results.append(
                     {
                         "status": "ERROR",
                         "line_content": clean_line,
                         "emoji_str": emoji_str,
                         "role": role,
-                        "error_message": "I cannot manage this role as it is higher than or equal to my own top role.",
+                        "error_message": error_msg,  # Use the message from our util
                     },
                 )
                 continue

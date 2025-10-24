@@ -4,9 +4,10 @@ import logging
 import math
 from typing import TYPE_CHECKING
 
+from modules.dtypes import NonNegativeInt
+
 if TYPE_CHECKING:
     from cogs.leveling import LevelingCog
-    from modules.dtypes import NonNegativeInt
 
 log = logging.getLogger(__name__)
 
@@ -19,12 +20,12 @@ def get_raw_level(xp: "NonNegativeInt") -> float:
     return max(xp - 6, 0) ** (1 / 2.5)
 
 
-def get_level(xp: "NonNegativeInt") -> int:
+def get_level(xp: "NonNegativeInt") -> NonNegativeInt:
     """Calculate the whole number level for a given XP amount."""
     return math.floor(get_raw_level(xp))
 
 
-def to_next_level(xp: "NonNegativeInt") -> int:
+def to_next_level(xp: "NonNegativeInt") -> NonNegativeInt:
     """Calculate the XP needed to reach the next level."""
     # Add a small epsilon to handle floating point inaccuracies at level boundaries
     current_level = get_level(xp)

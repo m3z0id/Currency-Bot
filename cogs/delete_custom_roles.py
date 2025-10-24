@@ -6,6 +6,7 @@ import discord
 from discord.ext import commands, tasks
 
 from modules.KiwiBot import KiwiBot
+from modules.security_utils import is_bot_hierarchy_sufficient, is_role_safe
 
 if TYPE_CHECKING:
     from modules.ConfigDB import GuildConfig
@@ -62,6 +63,17 @@ class RolePrunerCog(commands.Cog):
 
             # Prune the identified roles
             for role in roles_to_prune:
+                is_safe, safe_err = is_role_safe(role, require_no_permissions=True)  # Checks for 0 perms
+                is_high_enough, hier_err = is_bot_hierarchy_sufficient(guild, role)
+
+                if not is_safe:
+                    log.warning("Skipping deletion of role '%s' in %s: %s", role.name, guild.name, safe_err)
+                    continue
+
+                if not is_high_enough:
+                    log.warning("Skipping deletion of role '%s' in %s: %s", role.name, guild.name, hier_err)
+                    continue
+
                 try:
                     await role.delete(reason=f"Pruning old role created more than {custom_role_prune_days} days ago.")
                     log.info("Successfully pruned role '%s' from %s.", role.name, guild.name)

@@ -1,16 +1,16 @@
 from __future__ import annotations  # Defer type annotation evaluation
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 # --- Discord Imports ---
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.utils import format_dt  # For formatting timestamps
 
 # --- Local Imports ---
-from modules.dtypes import UserId
+from modules.dtypes import PositiveInt, UserId
 from modules.trading_logic import (
     ALLOWED_STOCKS,
     InsufficientFundsError,
@@ -35,6 +35,8 @@ log = logging.getLogger(__name__)
 # --- Choices for App Commands ---
 ALLOWED_TICKER_CHOICES = [app_commands.Choice(name=ticker, value=ticker) for ticker in sorted(ALLOWED_STOCKS)]
 
+SECOND_COOLDOWN: Final[int] = 1
+
 
 # --- Discord Cog ---
 @app_commands.guild_only()
@@ -48,7 +50,14 @@ class PaperTradingCog(commands.Cog):
             msg = "TradingLogic not initialized on bot before cog setup."
             raise RuntimeError(msg)
         self.trading_logic: TradingLogic = self.bot.trading_logic
-        log.info("PaperTradingCog initialized with bot's TradingLogic instance.")
+
+    # This is a special event that runs when the cog is loaded
+    async def cog_load(self) -> None:
+        self.liquidation_check.start()
+
+    def cog_unload(self) -> None:
+        """Clean up the task when the cog is unloaded."""
+        self.liquidation_check.cancel()
 
     # --- Helper to ensure guild context ---
     async def _ensure_guild_context(self, ctx: commands.Context) -> GuildId | None:
@@ -97,51 +106,60 @@ class PaperTradingCog(commands.Cog):
 
     # --- Commands ---
     @commands.hybrid_command(name="buy", description="Buy shares of a stock.")
+    @commands.cooldown(1, SECOND_COOLDOWN, commands.BucketType.user)
     @app_commands.choices(ticker=ALLOWED_TICKER_CHOICES)
     @app_commands.describe(
         ticker="Symbol (e.g., TQQQ).",
-        amount="The dollar amount to invest.",
+        amount="The dollar amount of collateral to use.",
+        leverage="The leverage to apply (e.g., 2 for 2x).",
     )
     async def buy(
         self,
         ctx: commands.Context,
         ticker: str,
         amount: commands.Range[int, 1],  # ty: ignore [invalid-type-form]
+        leverage: (app_commands.Range[int, 1, 10] | None) = None,  # ty: ignore [invalid-type-form]
     ) -> None:
         """Handle the buy/cover command, calling middleware."""
         guild_id = await self._ensure_guild_context(ctx)
         if not guild_id:
             return
 
+        leverage_int = PositiveInt(leverage or 1)  # Default to 1
+
         try:
             (
                 filled_price,
-                trade_amount,
+                _notional_amount_trade,
                 action,
                 timestamp,
                 was_stacked,
-                total_invested,
+                total_notional,
             ) = await self.trading_logic.open_position(
                 user_id=ctx.author.id,
                 guild_id=guild_id,
                 ticker=ticker,
                 trade_type="BUY",
                 dollar_amount=amount,
+                leverage=leverage_int,
             )
 
+            notional_amount = amount * leverage_int
             if was_stacked:
                 response_content = (
-                    f"✅ **{action} (Stacked)**\n"
-                    f"Added **${trade_amount:,.2f}** to your existing {ticker.upper()} position @ **${filled_price:,.2f}**\n"
-                    f"New position total: **${total_invested:,.2f}**\n"
+                    f"✅ **{action} (Stacked)** ({leverage_int}x Leverage)\n"
+                    f"Added **${notional_amount:,.2f}** notional value to your existing\
+                    {ticker.upper()} position @ **${filled_price:,.2f}**\n"
+                    f"Collateral Added: **${amount:,.2f}**\n"
+                    f"New Position Notional: **${total_notional:,.2f}**\n"
                     f"(Price as of {format_dt(timestamp, 'R')})"
                 )
             else:
                 response_content = (
-                    f"✅ **{action}**\n"
-                    f"Opened new **${trade_amount:,.2f}** position in {ticker.upper()} @ **${filled_price:,.2f}**\n"
+                    f"✅ **{action}** ({leverage_int}x Leverage)\n"
+                    f"Opened new **${notional_amount:,.2f}** position in {ticker.upper()} @ **${filled_price:,.2f}**\n"
                     f"(Price as of {format_dt(timestamp, 'R')})\n"
-                    f"Your cash balance has been debited by ${trade_amount:,.2f}."
+                    f"Your cash balance has been debited by **${amount:,.2f}** for collateral."
                 )
 
             if not self.trading_logic.is_market_open():
@@ -156,49 +174,59 @@ class PaperTradingCog(commands.Cog):
         name="short",
         description="Open a new short position in a stock.",
     )
+    @commands.cooldown(1, SECOND_COOLDOWN, commands.BucketType.user)
     @app_commands.choices(ticker=ALLOWED_TICKER_CHOICES)
     @app_commands.describe(
         ticker="Symbol (e.g., TQQQ).",
-        amount="The dollar amount to short (collateral).",
+        amount="The dollar amount of collateral to use.",
+        leverage="The leverage to apply (e.g., 2 for 2x).",
     )
     async def short(
         self,
         ctx: commands.Context,
         ticker: str,
         amount: commands.Range[int, 1],  # ty: ignore [invalid-type-form]
+        leverage: (app_commands.Range[int, 1, 10] | None) = None,  # ty: ignore [invalid-type-form]
     ) -> None:
         """Handle the short-sell command, calling middleware."""
         guild_id = await self._ensure_guild_context(ctx)
         if not guild_id:
             return
 
+        leverage_int = PositiveInt(leverage or 1)  # Default to 1
+
         try:
             (
                 filled_price,
-                trade_amount,  # This will be -100 for a $100 short
+                notional_amount_trade,  # This will be negative
                 action,
                 timestamp,
                 was_stacked,
-                total_invested,
+                total_notional,
             ) = await self.trading_logic.open_position(
                 user_id=ctx.author.id,
                 guild_id=guild_id,
                 ticker=ticker,
                 trade_type="SHORT",
                 dollar_amount=amount,
+                leverage=leverage_int,
             )
 
+            notional_amount = amount * leverage_int
             if was_stacked:
                 response_content = (
-                    f"✅ **{action} (Stacked)**\n"
-                    f"Added **${abs(trade_amount):,.2f}** to your existing {ticker.upper()} short position @ **${filled_price:,.2f}**\n"  # noqa: E501
-                    f"New position total: **${total_invested:,.2f}**\n"
+                    f"✅ **{action} (Stacked)** ({leverage_int}x Leverage)\n"
+                    f"Added **${notional_amount:,.2f}** notional value to your existing\
+                    {ticker.upper()} short position @ **${filled_price:,.2f}**\n"
+                    f"Collateral Added: **${amount:,.2f}**\n"
+                    f"New Position Notional: **${total_notional:,.2f}**\n"
                     f"(Price as of {format_dt(timestamp, 'R')})"
                 )
             else:
                 response_content = (
-                    f"✅ **{action}**\n"
-                    f"Opened new **${trade_amount:,.2f}** position in {ticker.upper()} @ **${filled_price:,.2f}**\n"
+                    f"✅ **{action}** ({leverage_int}x Leverage)\n"
+                    f"Opened new **${abs(notional_amount_trade):,.2f}** short position in\
+                    {ticker.upper()} @ **${filled_price:,.2f}**\n"
                     f"(Price as of {format_dt(timestamp, 'R')})\n"
                     f"Your cash balance has been debited by **${amount:,.2f}** for collateral."
                 )
@@ -215,9 +243,10 @@ class PaperTradingCog(commands.Cog):
         name="close",
         description="Close an open position by its ID.",
     )
+    @commands.cooldown(1, SECOND_COOLDOWN, commands.BucketType.user)
     @app_commands.describe(
         position_id="The ID of the position (from /portfolio).",
-        amount="The dollar amount of your *original investment* to close. (Optional: closes all if omitted)",
+        amount="The dollar amount of your *original collateral* to close. (Optional: closes all if omitted)",
     )
     async def close(
         self,
@@ -252,7 +281,7 @@ class PaperTradingCog(commands.Cog):
 
             response_content = (
                 f"{title} {ticker.upper()} (ID: {position_id})\n"
-                f"Original Cost Closed: ${abs(closed_amount):,.2f}\n"
+                f"Collateral Closed: ${abs(closed_amount):,.2f}\n"
                 f"{pnl_color} Realized P&L: **${pnl_precise:,.2f}**\n\n"
                 f"Total Value: ${total_credit_precise:,.2f}\n"
                 f"Transaction Fee: ${transaction_fee:,.2f}\n"
@@ -271,6 +300,7 @@ class PaperTradingCog(commands.Cog):
         name="price",
         description="Get the cached prices of all supported stocks.",
     )
+    @commands.cooldown(1, SECOND_COOLDOWN, commands.BucketType.user)
     async def price(self, ctx: commands.Context) -> None:
         """Handle the price command, reading all prices from the cache."""
         try:
@@ -324,8 +354,13 @@ class PaperTradingCog(commands.Cog):
         name="portfolio",
         description="View your paper trading portfolio.",
     )
+    @commands.cooldown(1, SECOND_COOLDOWN, commands.BucketType.user)
     @app_commands.describe(member="User whose portfolio to show")
-    async def portfolio(self, ctx: commands.Context, member: discord.Member | None = None) -> None:
+    async def portfolio(
+        self,
+        ctx: commands.Context,
+        member: discord.Member | None = None,
+    ) -> None:
         """Display the user's current portfolio value and holdings."""
         guild_id = await self._ensure_guild_context(ctx)
         if not guild_id:
@@ -369,18 +404,23 @@ class PaperTradingCog(commands.Cog):
 
             # Add new fields for Long Value and Short Liability
             embed.add_field(
-                name="⬆️ Long Holdings Value",
-                value=f"${portfolio_data['holdings_value']:,.2f}",
+                name="⬆️ Long Value",
+                value=f"${portfolio_data['long_value']:,.2f}",
                 inline=True,
             )
             embed.add_field(
-                name="⬇️ Short Liability",
-                value=f"${portfolio_data['short_liability']:,.2f}",
+                name="⬇️ Short Value",
+                value=f"${portfolio_data['short_value']:,.2f}",
                 inline=True,
             )
             embed.add_field(
-                name="🔒 Short Collateral",
-                value=f"${portfolio_data['short_collateral']:,.2f}",
+                name="🔒 Total Collateral",
+                value=f"${portfolio_data['collateral_held']:,.2f}",
+                inline=True,
+            )
+            embed.add_field(
+                name="Holdings Equity",
+                value=f"${portfolio_data['holdings_equity']:,.2f}",
                 inline=True,
             )
 
@@ -395,17 +435,17 @@ class PaperTradingCog(commands.Cog):
                 for pos in sorted_positions:
                     pos_id = pos["id"]
                     ticker = pos["ticker"]
-                    invested = pos["invested"]  # e.g., 100 or -100
-                    entry = pos["entry"]
+                    collateral = pos["collateral"]
+                    notional = pos["notional"]
 
                     val_str = f"${pos['current_value']:,.2f}" if pos["current_value"] is not None else "N/A"
                     pnl_str = f"${pos['pnl']:+.2f}" if pos["pnl"] is not None else "N/A"
 
                     # Use sign of invested amount
-                    pos_type = "LONG" if invested > 0 else "SHORT"
+                    pos_type = "LONG" if notional > 0 else "SHORT"
 
                     holdings_str += f"**ID: {pos_id}** | **{ticker}** ({pos_type})\n"
-                    holdings_str += f"└ Invested: ${invested:,.2f} @ ${entry:,.2f}\n"
+                    holdings_str += f"└ Collateral: ${collateral:,.2f} | Notional: ${notional:,.2f}\n"
                     holdings_str += f"└ Current Val: {val_str} | P&L: {pnl_str}\n"
             else:
                 holdings_str = "No open positions. Use /buy or /short to open one."
@@ -433,6 +473,7 @@ class PaperTradingCog(commands.Cog):
         name="stocks",
         description="List all tradable stocks and their descriptions.",
     )
+    @commands.cooldown(1, SECOND_COOLDOWN, commands.BucketType.user)
     async def list_stocks(self, ctx: commands.Context) -> None:
         """Display the list of tradable stocks."""
         embed = discord.Embed(
@@ -480,6 +521,50 @@ class PaperTradingCog(commands.Cog):
         embed.set_footer(text="Use /price <ticker> to get the latest cached price.")
 
         await ctx.send(embed=embed)
+
+    @tasks.loop(minutes=60)  # Runs hourly to reduce API rate limits
+    async def liquidation_check(self) -> None:
+        """Periodically check for and execute margin calls."""
+        try:
+            if not self.trading_logic.is_market_open():
+                return
+
+            liquidations = await self.trading_logic.get_liquidatable_positions()
+
+            for pos_id, user_id, guild_id, _ticker, pnl in liquidations:
+                log.info("Auto-liquidating position %s for user %s", pos_id, user_id)
+                try:
+                    # Close the position fully
+                    (
+                        ticker,
+                        pnl_final,
+                        *_,
+                    ) = await self.trading_logic.close_position(
+                        user_id,
+                        guild_id,
+                        pos_id,
+                        close_amount=None,
+                    )
+
+                    # Notify the user via DM
+                    user = self.bot.get_user(user_id)
+                    if user:
+                        await user.send(
+                            f"⚠️ **Margin Call!**\n"
+                            f"Your {ticker} position (ID: {pos_id}) was automatically liquidated "
+                            f"as its losses (${pnl:,.2f}) met or exceeded your collateral.\n"
+                            f"Realized P&L: **${pnl_final:,.2f}**",
+                        )
+                except Exception:
+                    log.exception("Failed to auto-liquidate position %s", pos_id)
+
+        except Exception:
+            log.exception("Error in liquidation_check loop")
+
+    @liquidation_check.before_loop
+    async def before_liquidation_check(self) -> None:
+        """Wait for bot to be logged in."""
+        await self.bot.wait_until_ready()
 
 
 # --- Cog Setup Function ---

@@ -1,4 +1,5 @@
 import logging
+from typing import Final
 
 import discord
 from discord import app_commands
@@ -9,6 +10,7 @@ from modules.enums import StatName
 from modules.KiwiBot import KiwiBot
 
 log = logging.getLogger(__name__)
+SECOND_COOLDOWN: Final[int] = 1
 
 
 class Donate(commands.Cog):
@@ -20,6 +22,7 @@ class Donate(commands.Cog):
         description="Donate to the poor",
         aliases=["give"],
     )
+    @commands.cooldown(2, SECOND_COOLDOWN, commands.BucketType.user)
     @app_commands.describe(receiver="User you want to donate to")
     @app_commands.describe(amount="Amount to donate")
     async def donate(
@@ -52,8 +55,7 @@ class Donate(commands.Cog):
             receiver_id=receiver_id,
             guild_id=guild_id,
             amount=amount,
-            # Pass the transactions_db instance required by the new method
-            transactions_db=self.bot.transactions_db,
+            ledger_db=self.bot.ledger_db,
         )
 
         if success:

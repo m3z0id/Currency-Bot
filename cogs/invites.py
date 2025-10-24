@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+from typing import Final
 
 import discord
 from discord import app_commands
@@ -9,6 +10,8 @@ from modules.dtypes import GuildId, InviterId, UserId
 from modules.KiwiBot import KiwiBot
 
 log = logging.getLogger(__name__)
+
+SECOND_COOLDOWN: Final[int] = 1
 
 
 class InvitesCog(commands.Cog):
@@ -169,9 +172,14 @@ class InvitesCog(commands.Cog):
         """Handle invite deletion to keep the cache updated."""
         if invite.guild and GuildId(invite.guild.id) in self.invites and invite.code in self.invites[GuildId(invite.guild.id)]:
             del self.invites[GuildId(invite.guild.id)][invite.code]
-            log.info("Removed deleted invite '%s' from cache for guild '%s'.", invite.code, invite.guild.name)
+            log.info(
+                "Removed deleted invite '%s' from cache for guild '%s'.",
+                invite.code,
+                invite.guild.name,
+            )
 
     @invites.command(name="top", description="Shows the invite leaderboard.")
+    @commands.cooldown(1, SECOND_COOLDOWN * 10, commands.BucketType.user)
     async def invites_top(self, interaction: discord.Interaction) -> None:
         """Display the top 10 inviters in an embed."""
         await interaction.response.defer()
@@ -196,6 +204,7 @@ class InvitesCog(commands.Cog):
         await interaction.followup.send(embed=embed)
 
     @invites.command(name="mylist", description="Shows who you have invited to the server.")
+    @commands.cooldown(1, SECOND_COOLDOWN * 10, commands.BucketType.user)
     async def invites_mylist(self, interaction: discord.Interaction) -> None:
         """Show a list of members invited by the user."""
         await interaction.response.defer(ephemeral=True)
@@ -212,19 +221,26 @@ class InvitesCog(commands.Cog):
 
         await interaction.followup.send(embed=embed)
 
-    @invites.command(name="import", description="[Owner] Bulk import invites from the API.")
+    @invites.command(
+        name="sync",
+        description="[Owner] Sync all current members against the invite database.",
+    )
+    @commands.cooldown(1, SECOND_COOLDOWN * 3600, commands.BucketType.user)
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def invites_import(self, interaction: discord.Interaction) -> None:
-        """Fetch all guild members and imports new invitee-inviter relationships."""
+    async def invites_sync(self, interaction: discord.Interaction) -> None:
+        """Fetch all guild members and syncs their data with the database.
+
+        This corrects any misattributions from 'on_member_join' and
+        backfills data for members who joined while the bot was offline.
+        """
         await interaction.response.defer(ephemeral=True)
-        await interaction.followup.send("Starting bulk import... this may take a while.")
+        await interaction.followup.send("Starting member sync... this may take a while.")
 
         try:
             guild_id = GuildId(interaction.guild.id)
-            existing_invitees = await self.bot.invites_db.get_all_invitee_ids(guild_id)
             all_members = await self.bot.invites_db.get_all_guild_members_api(guild_id)
         except Exception:
-            log.exception("Error during bulk import preparation.")
+            log.exception("Error during invites sync preparation.")
             await interaction.followup.send("An error occurred during preparation")
             return
 
@@ -232,30 +248,32 @@ class InvitesCog(commands.Cog):
             await interaction.followup.send("Could not fetch any members from the Discord API.")
             return
 
-        new_imports = 0
+        rows_affected = 0
         for member_data in all_members:
-            inviter_id = member_data.get("inviter_id")
-            if not inviter_id:
-                continue
+            inviter_id_str = member_data.get("inviter_id")
+            # We still process members without an inviter_id to update their joined_at
+            inviter_id: InviterId = UserId(int(inviter_id_str)) if inviter_id_str else None
 
             try:
                 member_info = member_data["member"]
                 invitee_id = UserId(int(member_info["user"]["id"]))
-                joined_at = member_info.get("joined_at")
+                joined_at_str = member_info.get("joined_at")
             except (KeyError, ValueError):
                 continue
 
-            if joined_at:
-                dt_object = datetime.fromisoformat(joined_at)
-                joined_at = dt_object.strftime("%Y-%m-%d %H:%M:%S")
+            joined_at_db: str | None = None
+            if joined_at_str:
+                try:
+                    dt_object = datetime.fromisoformat(joined_at_str)
+                    joined_at_db = dt_object.strftime("%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    log.warning("Could not parse joined_at timestamp: %s", joined_at_str)
+                    joined_at_db = None  # Let the DB handle it
 
-            if invitee_id in existing_invitees:
-                continue
+            if await self.bot.invites_db.sync_invite(invitee_id, inviter_id, guild_id, joined_at_db):
+                rows_affected += 1
 
-            if await self.bot.invites_db.insert_invite(invitee_id, UserId(int(inviter_id)), guild_id, joined_at):
-                new_imports += 1
-
-        await interaction.followup.send(f"Import complete. Added {new_imports} new invite records.")
+        await interaction.followup.send(f"Sync complete. {rows_affected} records were created or updated.")
 
 
 async def setup(bot: KiwiBot) -> None:

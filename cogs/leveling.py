@@ -13,6 +13,7 @@ from modules.enums import StatName
 
 # Import the refactored logic and helpers
 from modules.leveling_utils import LevelBotProtocol, get_level, to_next_level
+from modules.security_utils import SecurityCheckError, validate_bot_hierarchy, validate_role_safety
 
 if TYPE_CHECKING:
     from modules.KiwiBot import KiwiBot
@@ -36,7 +37,7 @@ class LevelingCog(commands.Cog):
 
     def __init__(
         self,
-        bot: "KiwiBot",  # Removed level_up_channel_id and guild_id from init
+        bot: "KiwiBot",
         udp_port: int | None,
         privileged_guild_id: GuildId,  # Special case for UDP, keep this global guild ID
     ) -> None:
@@ -85,8 +86,8 @@ class LevelingCog(commands.Cog):
         self,
         user_id: UserId,
         guild_id: GuildId,
-        new_level: int,  # This is a calculated value, not an ID, so int is correct.
-        new_xp: int,
+        new_level: NonNegativeInt,
+        new_xp: NonNegativeInt,
         source: str,
     ) -> None:
         """Format and send a level-up announcement to the configured channel."""
@@ -158,7 +159,6 @@ class LevelingCog(commands.Cog):
         new_level = get_level(new_xp)
 
         if new_level > old_level:
-            log.info("User %d leveled up to %d from %s.", user_id, new_level, source)
             # Pass new_xp to the handler so it can calculate the footer
             await self._handle_level_up_announcement(user_id, guild_id, new_level, new_xp, source)
 
@@ -226,6 +226,29 @@ class LevelingCog(commands.Cog):
             )
             return
 
+        try:
+            # Run our centralized security checks
+            # This role MUST have no permissions, so we set require_no_permissions=True
+            validate_role_safety(role, require_no_permissions=True)
+            validate_bot_hierarchy(interaction, role)
+
+        except SecurityCheckError:
+            await interaction.response.send_message(
+                "⚠️ This command is misconfigured due to a security risk. Please contact an admin.",
+                ephemeral=True,
+            )
+            # Log this for the admin, as it's a critical misconfiguration
+            await self.bot.log_admin_warning(
+                guild_id=GuildId(interaction.guild.id),
+                warning_type="dangerous_role_assignment",
+                description=(
+                    f"The `/level opt-out` command was **blocked** because the "
+                    f"configured `xp_opt_out_role_id` ({role.mention}) has extra permissions."
+                ),
+                level="ERROR",
+            )
+            return
+
         if role in interaction.user.roles:
             await interaction.response.send_message("ℹ️ You already have the XP Opt-Out role.", ephemeral=True)  # noqa: RUF001
             return
@@ -237,6 +260,7 @@ class LevelingCog(commands.Cog):
                 ephemeral=True,
             )
         except discord.Forbidden:
+            # This is now a fallback, as validate_bot_hierarchy should catch most issues
             await interaction.response.send_message(
                 "⚠️ I do not have permission to assign that role. Please contact an admin.",
                 ephemeral=True,
@@ -260,6 +284,25 @@ class LevelingCog(commands.Cog):
             await interaction.response.send_message(
                 "⚠️ The configured XP Opt-Out role no longer exists. Please contact an admin.",
                 ephemeral=True,
+            )
+            return
+
+        try:
+            # We only need to check hierarchy here, as we are removing the role.
+            # The permissions don't matter for removal, but hierarchy does.
+            validate_bot_hierarchy(interaction, role)
+
+        except SecurityCheckError:
+            await interaction.response.send_message(
+                "⚠️ I cannot process this command due to a configuration issue. Please contact an admin.",
+                ephemeral=True,
+            )
+            # Log this for the admin
+            await self.bot.log_admin_warning(
+                guild_id=GuildId(interaction.guild.id),
+                warning_type="role_hierarchy_error",
+                description=(f"The `/level opt-in` command failed a security check for role {role.mention}"),
+                level="ERROR",
             )
             return
 

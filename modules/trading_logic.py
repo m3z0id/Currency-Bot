@@ -14,22 +14,22 @@ import asyncio
 import datetime
 import logging
 import math
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 # --- Local Imports ---
 if TYPE_CHECKING:
+    import aiohttp
     import aiosqlite
 
-    from modules.Database import Database  # For type hinting
-    from modules.dtypes import GuildId, PositiveInt, UserId  # Import PositiveInt
+    from modules.CurrencyLedgerDB import CurrencyLedgerDB
+    from modules.Database import Database
+    from modules.dtypes import GuildId, PositiveInt, UserId
     from modules.UserDB import UserDB
 
 # Import new exceptions
-from modules.aio_twelvedata import AioTwelveDataClient, AioTwelveDataError, AioTwelveDataRequestError
+from modules.aio_twelvedata import AioTwelveDataClient, AioTwelveDataError, AioTwelveDataRequestError, Ticker
+from modules.CurrencyLedgerDB import COLLATERAL_POOL_ID, SYSTEM_USER_ID
 from modules.enums import StatName
-
-# --- Type Hinting Setup ---
-type Ticker = str
 
 # --- Logging ---
 log = logging.getLogger(__name__)
@@ -191,7 +191,7 @@ class PriceCache:
                         return self._prices  # Returns empty {}
 
                 # Now, set the "intelligent TTL"
-                time_to_open_str = self._market_state.get("time_to_open")
+                time_to_open_str = cast("str", self._market_state.get("time_to_open"))
                 time_to_open_delta = _parse_api_time(time_to_open_str)
 
                 if time_to_open_delta:
@@ -220,8 +220,13 @@ class PriceCache:
         ticker: Ticker,
     ) -> tuple[float, datetime.datetime] | tuple[None, None]:
         """Get a single price and its timestamp directly from the cache."""
-        # This method is unchanged
-        return self._prices.get(ticker), self._timestamps.get(ticker)
+        price = self._prices.get(ticker)
+        timestamp = self._timestamps.get(ticker)
+
+        # Ensure we only return (float, datetime) or (None, None)
+        if price is not None and timestamp is not None:
+            return price, timestamp
+        return None, None
 
 
 # --- Custom Exceptions (can be shared or defined here) ---
@@ -249,11 +254,14 @@ class TradingLogic:
         self,
         database: Database,
         user_db: UserDB,
-        api_key: str,  # Use the new client
+        ledger_db: CurrencyLedgerDB,
+        api_key: str,
+        session: aiohttp.ClientSession,
     ) -> None:
         self.database = database
         self.user_db = user_db
-        self.api_client = AioTwelveDataClient(api_key=api_key)
+        self.api_client = AioTwelveDataClient(api_key=api_key, session=session)
+        self.ledger_db = ledger_db
         self.price_cache = PriceCache(self.api_client)
         log.info("TradingLogic initialized with PriceCache and AioTwelveDataClient.")
 
@@ -264,14 +272,21 @@ class TradingLogic:
                 """
                 CREATE TABLE IF NOT EXISTS positions (
                     position_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id         INTEGER NOT NULL,
-                    guild_id        INTEGER NOT NULL,
+                    user_id         INTEGER NOT NULL CHECK(user_id > 1000000),
+                    guild_id        INTEGER NOT NULL CHECK(guild_id > 1000000),
                     ticker          TEXT NOT NULL,
-                    invested_dollars INTEGER NOT NULL, -- User's integer input, e.g., 100 or -100
-                    entry_price     REAL NOT NULL,    -- Price at open
+                    notional_dollars INTEGER NOT NULL CHECK(notional_dollars != 0),
+                    collateral_dollars INTEGER NOT NULL CHECK(collateral_dollars > 0),
+                    entry_price     REAL NOT NULL CHECK(entry_price > 0),    -- Price at open
                     timestamp       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
                     FOREIGN KEY (user_id, guild_id) REFERENCES users(discord_id, guild_id)
                 ) STRICT;
+                """,
+            )
+            # Add an index for guild_id and last_active_timestamp to speed up activity queries.
+            await conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_positions_user ON positions (user_id, guild_id);
                 """,
             )
             await conn.commit()
@@ -323,6 +338,7 @@ class TradingLogic:
         ticker: Ticker,
         trade_type: Literal["BUY", "SHORT"],  # Literal for specific string values
         dollar_amount: PositiveInt,  # This is now a PositiveInt
+        leverage: PositiveInt = 1,
     ) -> tuple[float, int, str, datetime.datetime, bool, int]:
         """Open a new long or short position (a new 'lot').
 
@@ -330,32 +346,35 @@ class TradingLogic:
         by exactly the amount they specified.
 
         Returns:
-            A tuple of (filled_price, invested_dollars_this_trade, action_string,
-            timestamp, was_stacked, total_invested_in_position).
+            A tuple of (filled_price, notional_amount_trade, action_string,
+            timestamp, was_stacked, total_notional_in_position).
 
         """
         ticker = ticker.upper()
 
         # 1. Get Price
-        price_map = await self.price_cache.get_fresh_prices()
-        current_price, timestamp = (
-            price_map.get(ticker),
-            self.price_cache.get_cached_price(ticker)[1],
-        )
+        await self.price_cache.get_fresh_prices()  # Ensures cache is fresh
 
-        if current_price is None or float(current_price) <= 0:
+        # Get price and timestamp *from the cache*
+        current_price, timestamp = self.price_cache.get_cached_price(ticker)
+
+        # Check both price and timestamp
+        if current_price is None or float(current_price) <= 0 or timestamp is None:
             msg = f"Trade rejected: {ticker} is not a supported trading symbol or has no price."
             raise PriceNotAvailableError(msg)
 
+        # From here, current_price is a float and timestamp is a datetime.datetime
         current_price_float = float(current_price)
 
         # 2. Determine Position Details
         if trade_type == "BUY":
-            invested_dollars_int = dollar_amount
+            notional_dollars_int = dollar_amount * leverage
+            collateral_dollars_int = dollar_amount
             cash_change_int = -dollar_amount  # Debit user
             action = "BOUGHT"
         else:  # "SHORT"
-            invested_dollars_int = -dollar_amount
+            notional_dollars_int = -(dollar_amount * leverage)
+            collateral_dollars_int = dollar_amount  # Collateral is always a positive debit
             cash_change_int = -dollar_amount  # Debit for collateral
             action = "SHORTED"
 
@@ -369,13 +388,26 @@ class TradingLogic:
                     cash_change_int,
                 )
 
+                # 2. Log the collateral transfer to the ledger
+                await self.ledger_db.log_event(
+                    conn=conn,
+                    guild_id=guild_id,
+                    event_type="TRANSFER",
+                    event_reason="TRADE_OPEN_COLLATERAL",
+                    sender_id=user_id,
+                    receiver_id=COLLATERAL_POOL_ID,
+                    amount=dollar_amount,
+                    initiator_id=user_id,
+                    reference_id=f"TICKER:{ticker.upper()}",  # Placeholder, since position_id doesn't exist yet
+                )
+
                 # 2. Check for a stackable position OF THE SAME TYPE
-                # We must only stack longs on longs (invested_dollars > 0)
-                # and shorts on shorts (invested_dollars < 0)
-                stack_direction_check = "invested_dollars > 0" if trade_type == "BUY" else "invested_dollars < 0"
+                # We must only stack longs on longs (notional_dollars > 0)
+                # and shorts on shorts (notional_dollars < 0)
+                stack_direction_check = "notional_dollars > 0" if trade_type == "BUY" else "notional_dollars < 0"
 
                 cursor = await conn.execute(
-                    f"""SELECT position_id, invested_dollars FROM positions
+                    f"""SELECT position_id, notional_dollars, collateral_dollars FROM positions
                         WHERE user_id = ? AND guild_id = ? AND ticker = ?
                         AND entry_price = ? AND {stack_direction_check}""",  # noqa: S608 (f-string is safe)
                     (user_id, guild_id, ticker, current_price_float),
@@ -383,33 +415,35 @@ class TradingLogic:
                 existing_position = await cursor.fetchone()
 
                 was_stacked = False
-                total_invested_in_position = 0
+                total_notional_in_position = 0
 
                 if existing_position:
                     # Stack the position
                     was_stacked = True
-                    position_id, existing_invested = existing_position
-                    new_invested_dollars = existing_invested + invested_dollars_int
-                    total_invested_in_position = new_invested_dollars
+                    position_id, existing_notional, existing_collateral = existing_position
+                    new_notional = existing_notional + notional_dollars_int
+                    new_collateral = existing_collateral + collateral_dollars_int
+                    total_notional_in_position = new_notional
 
                     await conn.execute(
-                        "UPDATE positions SET invested_dollars = ? WHERE position_id = ?",
-                        (new_invested_dollars, position_id),
+                        "UPDATE positions SET notional_dollars = ?, collateral_dollars = ? WHERE position_id = ?",
+                        (new_notional, new_collateral, position_id),
                     )
                 else:
                     # Create a new position lot
                     was_stacked = False
-                    total_invested_in_position = invested_dollars_int
+                    total_notional_in_position = notional_dollars_int
                     await conn.execute(
                         """
-                        INSERT INTO positions (user_id, guild_id, ticker, invested_dollars, entry_price)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO positions (user_id, guild_id, ticker, notional_dollars, collateral_dollars, entry_price)
+                        VALUES (?, ?, ?, ?, ?, ?)
                         """,
                         (
                             user_id,
                             guild_id,
                             ticker,
-                            invested_dollars_int,
+                            notional_dollars_int,
+                            collateral_dollars_int,
                             current_price_float,
                         ),
                     )
@@ -437,14 +471,14 @@ class TradingLogic:
             else:
                 return (
                     current_price_float,
-                    invested_dollars_int,  # The amount for this trade, e.g., 100 or -100
+                    notional_dollars_int,
                     action,
                     timestamp,
                     was_stacked,
-                    total_invested_in_position,
+                    total_notional_in_position,
                 )
 
-    async def close_position(
+    async def close_position(  # noqa: PLR0915
         self,
         user_id: UserId,
         guild_id: GuildId,
@@ -458,7 +492,7 @@ class TradingLogic:
 
         Returns
         -------
-            A tuple of (ticker, pnl_precise, total_credit_precise, final_credit_int, invested_dollars_closed, is_partial_close)
+            Tuple of (ticker, pnl_precise, total_credit_precise, final_credit_int, collateral_dollars_to_close, is_partial_close)
 
         """
         async with self.database.get_conn() as conn:
@@ -466,7 +500,7 @@ class TradingLogic:
                 # 1. Get the position
                 cursor = await conn.execute(
                     """
-                    SELECT ticker, invested_dollars, entry_price
+                    SELECT ticker, notional_dollars, collateral_dollars, entry_price
                     FROM positions
                     WHERE position_id = ? AND user_id = ? AND guild_id = ?
                     """,
@@ -478,24 +512,29 @@ class TradingLogic:
                     msg = f"Position ID {position_id} not found or does not belong to you."
                     raise PortfolioNotFoundError(msg)
 
-                ticker, invested_dollars_total, entry_price = row
+                (
+                    ticker,
+                    notional_dollars_total,
+                    collateral_dollars_total,
+                    entry_price,
+                ) = row
                 ticker = str(ticker)
-                invested_dollars_total = int(invested_dollars_total)
+                notional_dollars_total = int(notional_dollars_total)
+                collateral_dollars_total = int(collateral_dollars_total)
                 entry_price = float(entry_price)
 
                 # 2. Determine Amount to Close
-                invested_dollars_to_close = invested_dollars_total
+                # Default to a full close
+                proportion_to_close = 1.0
+                is_partial_close = False
 
-                # A partial close is only possible if a close_amount is specified
-                # and it's less than the total invested amount.
-                is_partial_close = close_amount is not None and close_amount < abs(invested_dollars_total)
+                if close_amount is not None and close_amount < collateral_dollars_total:
+                    is_partial_close = True
+                    proportion_to_close = close_amount / collateral_dollars_total
 
-                # This explicit check helps the type checker narrow `close_amount` to `int`.
-                # We know this is true because of the `is_partial_close` condition.
-                if is_partial_close and close_amount is not None:
-                    # We've already confirmed close_amount is not None, so this is safe.
-                    # Match the sign of the original investment for the partial amount.
-                    invested_dollars_to_close = close_amount if invested_dollars_total > 0 else -close_amount
+                # Calculate the amounts for *this* close
+                notional_dollars_to_close = notional_dollars_total * proportion_to_close
+                collateral_dollars_to_close = collateral_dollars_total * proportion_to_close
 
                 # 2. Get Current Price
                 price_map = await self.price_cache.get_fresh_prices()
@@ -510,12 +549,12 @@ class TradingLogic:
                 # This simple math works for both long (invested_dollars > 0)
                 # and short (invested_dollars < 0)
                 price_change_pct = (current_price_float / entry_price) - 1.0
-                pnl_precise = invested_dollars_to_close * price_change_pct
+                pnl_precise = notional_dollars_to_close * price_change_pct
 
                 # The total value to return to the user
                 # For Long: 100 (principal) + 16.66 (pnl) = 116.66
                 # For Short: 100 (abs(principal)) + 16.66 (pnl) = 116.66
-                total_credit_precise = abs(invested_dollars_to_close) + pnl_precise
+                total_credit_precise = collateral_dollars_to_close + pnl_precise
 
                 # 4. Apply Slippage (The Money Sink)
                 # We floor the credit. e.g., 116.66 -> 116.
@@ -529,12 +568,73 @@ class TradingLogic:
                     final_credit_int,  # This is the final credit
                 )
 
-                # 6. Update or Delete the position
+                # 6. Log the close events
+                pnl_int = final_credit_int - int(collateral_dollars_to_close)
+                reference_str = f"position_id:{position_id}"
+
+                if pnl_int >= 0:
+                    # Close with Profit
+                    # 6a. Return the Collateral
+                    await self.ledger_db.log_event(
+                        conn=conn,
+                        guild_id=guild_id,
+                        event_type="TRANSFER",
+                        event_reason="TRADE_CLOSE_COLLATERAL",
+                        sender_id=COLLATERAL_POOL_ID,
+                        receiver_id=user_id,
+                        amount=int(collateral_dollars_to_close),
+                        initiator_id=user_id,
+                        reference_id=reference_str,
+                    )
+                    # 6b. Mint the *Integer* Profit
+                    if pnl_int > 0:
+                        await self.ledger_db.log_event(
+                            conn=conn,
+                            guild_id=guild_id,
+                            event_type="MINT",
+                            event_reason="TRADE_PROFIT",
+                            sender_id=SYSTEM_USER_ID,
+                            receiver_id=user_id,
+                            amount=pnl_int,
+                            initiator_id=user_id,
+                            reference_id=reference_str,
+                        )
+                else:
+                    # Close with Loss
+                    loss_int = abs(pnl_int)  # pnl_int is negative here
+                    # 6a. Return the Remaining Collateral (if any)
+                    if final_credit_int > 0:
+                        await self.ledger_db.log_event(
+                            conn=conn,
+                            guild_id=guild_id,
+                            event_type="TRANSFER",
+                            event_reason="TRADE_CLOSE_COLLATERAL",
+                            sender_id=COLLATERAL_POOL_ID,
+                            receiver_id=user_id,
+                            amount=final_credit_int,
+                            initiator_id=user_id,
+                            reference_id=reference_str,
+                        )
+                    # 6b. Burn the *Integer* Loss
+                    await self.ledger_db.log_event(
+                        conn=conn,
+                        guild_id=guild_id,
+                        event_type="BURN",
+                        event_reason="TRADE_LOSS",
+                        sender_id=COLLATERAL_POOL_ID,
+                        receiver_id=SYSTEM_USER_ID,
+                        amount=loss_int,
+                        initiator_id=user_id,
+                        reference_id=reference_str,
+                    )
+
+                # 7. Update or Delete the position
                 if is_partial_close:
-                    new_invested_dollars = invested_dollars_total - invested_dollars_to_close
+                    new_notional = notional_dollars_total - notional_dollars_to_close
+                    new_collateral = collateral_dollars_total - collateral_dollars_to_close
                     await conn.execute(
-                        "UPDATE positions SET invested_dollars = ? WHERE position_id = ?",
-                        (new_invested_dollars, position_id),
+                        "UPDATE positions SET notional_dollars = ?, collateral_dollars = ? WHERE position_id = ?",
+                        (new_notional, new_collateral, position_id),
                     )
                 else:
                     await conn.execute(
@@ -542,7 +642,7 @@ class TradingLogic:
                         (position_id,),
                     )
 
-                # 7. Commit
+                # 8. Commit
                 await conn.commit()
 
                 log.info(
@@ -566,7 +666,7 @@ class TradingLogic:
                     pnl_precise,
                     total_credit_precise,
                     final_credit_int,
-                    invested_dollars_to_close,
+                    int(collateral_dollars_to_close),
                     is_partial_close,
                 )
 
@@ -596,7 +696,7 @@ class TradingLogic:
         async with self.database.get_cursor() as cursor:
             await cursor.execute(
                 """
-                SELECT position_id, ticker, invested_dollars, entry_price, timestamp
+                SELECT position_id, ticker, notional_dollars, collateral_dollars, entry_price, timestamp
                 FROM positions
                 WHERE user_id = ? AND guild_id = ?
                 ORDER BY timestamp ASC
@@ -605,15 +705,24 @@ class TradingLogic:
             )
             rows = await cursor.fetchall()
 
-        total_long_value = 0.0
-        total_short_liability = 0.0
-        total_short_collateral = 0.0
+        total_holdings_equity = 0.0
+        total_collateral_held = 0.0
         total_pnl = 0.0
         positions_list = []
+        long_value = 0.0
+        short_value = 0.0
 
         for row in rows:
-            pos_id, ticker, invested_dollars, entry_price, timestamp = row
-            invested_dollars = int(invested_dollars)
+            (
+                pos_id,
+                ticker,
+                notional_dollars,
+                collateral_dollars,
+                entry_price,
+                timestamp,
+            ) = row
+            notional_dollars = int(notional_dollars)
+            collateral_dollars = int(collateral_dollars)
             entry_price = float(entry_price)
 
             current_price, _ = self.price_cache.get_cached_price(ticker)
@@ -621,7 +730,8 @@ class TradingLogic:
             pos_data = {
                 "id": pos_id,
                 "ticker": ticker,
-                "invested": invested_dollars,  # e.g., 100 or -100
+                "collateral": collateral_dollars,
+                "notional": notional_dollars,
                 "entry": entry_price,
                 "timestamp": timestamp,
                 "current_price": current_price,
@@ -632,35 +742,76 @@ class TradingLogic:
             if current_price is not None:
                 current_price_float = float(current_price)
                 price_change_pct = (current_price_float / entry_price) - 1.0
-                pnl = invested_dollars * price_change_pct
-                current_value = invested_dollars + pnl  # This is the "market value"
+                pnl = notional_dollars * price_change_pct
+                current_equity = collateral_dollars + pnl
 
                 pos_data["current_price"] = current_price_float
-                pos_data["current_value"] = current_value
+                pos_data["current_value"] = current_equity
                 pos_data["pnl"] = pnl
 
                 total_pnl += pnl
-                if invested_dollars > 0:
-                    total_long_value += current_value
+                total_collateral_held += collateral_dollars
+                total_holdings_equity += current_equity
+
+                if notional_dollars > 0:
+                    long_value += current_equity
                 else:
-                    # current_value will be negative, e.g., -80
-                    # This represents a liability of 80
-                    total_short_liability += abs(current_value)
-                    # Add the original investment amount to the collateral tracker
-                    total_short_collateral += abs(invested_dollars)
+                    short_value += current_equity
 
             positions_list.append(pos_data)
 
-        # Net Equity = Cash + (Value of Longs) - (Liability of Shorts) + (Collateral for Shorts)
-        total_holdings_value = total_long_value - total_short_liability
-        total_portfolio_value = user_cash_balance + total_holdings_value + total_short_collateral
+        # Net Equity = Cash + (Equity of all positions)
+        # Note: total_holdings_equity = total_collateral_held + total_pnl
+        total_portfolio_value = user_cash_balance + total_holdings_equity
 
         return {
             "cash_balance": user_cash_balance,
-            "holdings_value": total_long_value,  # Value of long positions
-            "short_liability": total_short_liability,  # ABS value of short positions
-            "short_collateral": total_short_collateral,  # Collateral held for shorts
+            "holdings_equity": total_holdings_equity,
+            "collateral_held": total_collateral_held,
             "total_value": total_portfolio_value,  # True Net Equity
             "total_pnl": total_pnl,
             "positions": positions_list,  # List of dictionaries
+            "long_value": long_value,
+            "short_value": short_value,
         }
+
+    async def get_liquidatable_positions(
+        self,
+    ) -> list[tuple[int, UserId, GuildId, Ticker, float]]:
+        """Fetch all positions where unrealized P&L has wiped out the collateral.
+
+        Returns
+        -------
+            A list of (position_id, user_id, guild_id, ticker, pnl) tuples.
+
+        """
+        try:
+            prices = await self.price_cache.get_fresh_prices()
+        except ConnectionError:
+            log.warning("Skipping liquidation check; cannot get fresh prices.")
+            return []
+
+        query = """
+            SELECT position_id, user_id, guild_id, ticker,
+                   notional_dollars, collateral_dollars, entry_price
+            FROM positions
+        """
+        positions_to_close = []
+        async with self.database.get_cursor() as cursor:
+            await cursor.execute(query)
+            for row in await cursor.fetchall():
+                pos_id, user_id, guild_id, ticker, notional, collateral, entry = row
+
+                current_price = prices.get(ticker)
+                if not current_price or float(current_price) <= 0:
+                    continue  # Can't liquidate without a price
+
+                price_change_pct = (float(current_price) / entry) - 1.0
+                pnl = notional * price_change_pct
+
+                # --- THIS IS THE MARGIN CALL ---
+                if pnl <= -collateral:
+                    # The loss has exceeded or equaled the collateral.
+                    positions_to_close.append((pos_id, user_id, guild_id, ticker, pnl))
+
+        return positions_to_close
